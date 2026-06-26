@@ -15,12 +15,17 @@ import subprocess
 import threading
 import ssl
 import hashlib
+import shutil
+import site
+import sysconfig
+from pathlib import Path
 
 PORT = 8080
 COMPILED_TOKENS = []
 TARGET_MODULE = None
 SESSION_KEY = None
-TEMP_SCRIPT_FILE = None
+TEMP_DIR = None          # Temporary directory for Mode 2 codebase
+PROJECT_DIR = None       # Master's script directory (for bundling)
 
 # ---------- Shared form state (for bi‑directional SSE) ----------
 shared_form_state = {}
@@ -41,12 +46,61 @@ def broadcast_event(event_type, data):
         for d in dead:
             sse_clients.remove(d)
 
+# ---------- Auto‑bundle logic ----------
+EXCLUDE_DIRS = {'.git', '__pycache__', 'venv', '.venv', 'env', 'node_modules', '.mypy_cache', '.pytest_cache'}
+
+def collect_project_files(project_dir):
+    """Walk project_dir and return list of relative paths for .py files."""
+    files = []
+    for root, dirs, filenames in os.walk(project_dir):
+        dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS and not d.startswith('.')]
+        for fname in filenames:
+            if fname.endswith('.py'):
+                full = os.path.join(root, fname)
+                rel = os.path.relpath(full, project_dir)
+                files.append(rel)
+    return files
+
+def get_bundle_manifest():
+    """Return a dict with 'files' list and optional 'requires' list."""
+    if not PROJECT_DIR:
+        return {'files': [], 'requires': []}
+    requires = []
+    include = None
+    manifest_path = os.path.join(PROJECT_DIR, 'pybro.toml')
+    if os.path.exists(manifest_path):
+        try:
+            import tomllib
+            with open(manifest_path, 'rb') as f:
+                config = tomllib.load(f)
+            distribute = config.get('distribute', {})
+            include = distribute.get('include')
+            requires = distribute.get('requires', [])
+        except Exception as e:
+            print(f"[!] Could not parse pybro.toml: {e}. Falling back to auto‑bundle.")
+
+    if include:
+        files = []
+        for pattern in include:
+            full = os.path.join(PROJECT_DIR, pattern)
+            if os.path.isfile(full):
+                files.append(pattern)
+            elif os.path.isdir(full):
+                for root, _, fnames in os.walk(full):
+                    for fn in fnames:
+                        if fn.endswith('.py'):
+                            rel = os.path.relpath(os.path.join(root, fn), PROJECT_DIR)
+                            files.append(rel)
+        return {'files': files, 'requires': requires}
+
+    # Auto‑bundle: all .py files
+    return {'files': collect_project_files(PROJECT_DIR), 'requires': requires}
+
 class UpgradedUIParser(ast.NodeVisitor):
     def __init__(self):
         self.var_table = {}
 
     def visit_Module(self, node):
-        # First pass: collect simple top‑level assignments
         for stmt in node.body:
             if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
                 target = stmt.targets[0]
@@ -61,22 +115,19 @@ class UpgradedUIParser(ast.NodeVisitor):
         if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
             if node.func.value.id == 'ui':
                 func_name = node.func.attr
-                # Positional arguments
                 args = []
                 for arg in node.args:
                     try:
                         args.append(ast.literal_eval(arg))
                     except ValueError:
                         if isinstance(arg, ast.Name):
-                            # Look up in the pre‑collected variable table
                             if arg.id in self.var_table:
                                 args.append(self.var_table[arg.id])
                             else:
-                                args.append(arg.id)   # fallback for callback names, etc.
+                                args.append(arg.id)
                         else:
                             args.append(None)
 
-                # Keyword arguments (css, class_)
                 kwargs = {}
                 for kw in node.keywords:
                     if kw.arg == 'css':
@@ -169,7 +220,6 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
             client_queue = queue.Queue()
             with sse_lock:
                 sse_clients.append(client_queue)
-            # Send current form state on connection
             with state_lock:
                 current_state = json.dumps(dict(shared_form_state))
             client_queue.put(("state_update", current_state))
@@ -188,21 +238,31 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
                     if client_queue in sse_clients:
                         sse_clients.remove(client_queue)
 
-        elif clean_path == '/script':
+        elif clean_path == '/bundle':
             if not self.is_authorized():
                 self.send_response(401); self.end_headers()
                 self.wfile.write(b"Unauthorized")
                 return
-            if TARGET_MODULE is None:
-                self.send_error(404, "No script loaded on master")
+            if not PROJECT_DIR:
+                self.send_error(404, "No project directory on master")
                 return
-            if not hasattr(self.server, 'script_content'):
-                self.send_error(404, "Script content unavailable")
-                return
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/plain')
-            self.end_headers()
-            self.wfile.write(self.server.script_content.encode())
+            try:
+                manifest = get_bundle_manifest()
+                file_list = manifest['files']
+                requires = manifest['requires']
+                files = []
+                for rel_path in file_list:
+                    full_path = os.path.join(PROJECT_DIR, rel_path)
+                    with open(full_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    files.append({"path": rel_path, "content": content})
+                resp = {"files": files, "requires": requires}
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps(resp).encode())
+            except Exception as e:
+                self.send_error(500, str(e))
 
         elif clean_path in ('', '/', '/index.html'):
             self.send_response(200)
@@ -228,7 +288,6 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
             global shared_form_state
             with state_lock:
                 shared_form_state.update(post_data.get('form_state', {}))
-            # Broadcast to all SSE clients except sender (we just send to all, harmless)
             broadcast_event("state_update", json.dumps(shared_form_state))
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
@@ -279,17 +338,18 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
             broadcast_event("callback_output", resp)
 
 def main():
-    global COMPILED_TOKENS, TARGET_MODULE, SESSION_KEY, TEMP_SCRIPT_FILE
+    global COMPILED_TOKENS, TARGET_MODULE, SESSION_KEY, TEMP_DIR, PROJECT_DIR
 
     parser = argparse.ArgumentParser(description="Pybro Engine Runtime Framework")
     parser.add_argument("script", nargs="?", help="Target python automation script to compile")
     parser.add_argument("--shared", action="store_true", help="Mode 1: Shared Team Mode (exposes to LAN with security key)")
     parser.add_argument("--key", help="Specify a custom security key string")
     parser.add_argument("--connect", help="Mode 2: Remote Client Mirror (pulls blueprints from remote target IP:port)")
-    parser.add_argument("--keep-script", action="store_true", help="In Mode 2, keep the downloaded temporary script after exit")
+    parser.add_argument("--keep-script", action="store_true", help="In Mode 2, keep the downloaded temporary codebase after exit")
     parser.add_argument("--port", type=int, default=8080, help="Server port (default 8080)")
     parser.add_argument("--verbose", action="store_true", help="Enable HTTP request logging")
     parser.add_argument("--ssl", action="store_true", help="Generate a self‑signed certificate and serve over HTTPS")
+    parser.add_argument("--allow-deps", action="store_true", help="In Mode 2, install external dependencies listed in the project's pybro.toml into a temporary venv")
     args = parser.parse_args()
 
     PORT = args.port
@@ -319,49 +379,130 @@ def main():
             print(f"[-] Failed to fetch tokens: {e}")
             sys.exit(1)
 
-        # Fetch script
+        # Fetch bundle (multi‑file codebase + deps)
         try:
-            req = urllib.request.Request(f"{remote_target.split('?')[0].rstrip('/')}/script", headers=headers)
-            with urllib.request.urlopen(req, timeout=5) as response:
-                script_content = response.read().decode()
+            req = urllib.request.Request(f"{remote_target.split('?')[0].rstrip('/')}/bundle", headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as response:
+                bundle = json.loads(response.read().decode())
+                files = bundle.get('files', [])
+                requires = bundle.get('requires', [])
+                if not files:
+                    raise ValueError("Empty bundle received")
+            print(f"[+] Received {len(files)} source files.")
         except Exception as e:
-            print(f"[-] Failed to fetch remote script: {e}")
+            print(f"[-] Failed to fetch bundle from master: {e}")
+            print("[!] Make sure the master is running with a script (not in --connect mode) and the project directory is accessible.")
             sys.exit(1)
 
-        # Save to temp
-        fd, temp_path = tempfile.mkstemp(suffix='.py', prefix='pybro_script_', text=True)
-        with os.fdopen(fd, 'w') as f:
-            f.write(script_content)
-        TEMP_SCRIPT_FILE = temp_path
-        print(f"[+] Script saved to temporary file: {temp_path}")
+        # Create temp directory and extract all files
+        TEMP_DIR = tempfile.mkdtemp(prefix='pybro_')
+        for file_info in files:
+            rel_path = file_info['path']
+            content = file_info['content']
+            dest_path = os.path.join(TEMP_DIR, rel_path)
+            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+            with open(dest_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+        print(f"[+] Codebase extracted to {TEMP_DIR}")
 
-        # Load module
-        module_name = os.path.splitext(os.path.basename(temp_path))[0]
-        spec = importlib.util.spec_from_file_location(module_name, temp_path)
-        TARGET_MODULE = importlib.util.module_from_spec(spec)
-        try:
-            spec.loader.exec_module(TARGET_MODULE)
-            print("[+] Callback module loaded successfully.")
-        except Exception as e:
-            print(f"[!] Warning: could not execute module: {e}")
+        # Add temp directory to sys.path so imports work (for pure Python)
+        if TEMP_DIR not in sys.path:
+            sys.path.insert(0, TEMP_DIR)
+
+        # Handle external dependencies
+        if requires:
+            if args.allow_deps:
+                print("[*] Installing external dependencies...")
+                venv_dir = os.path.join(TEMP_DIR, '.venv')
+                try:
+                    subprocess.run([sys.executable, '-m', 'venv', venv_dir], check=True, capture_output=True)
+                except subprocess.CalledProcessError as e:
+                    print(f"[!] Failed to create virtual environment: {e.stderr.decode()}")
+                    sys.exit(1)
+
+                # Determine pip and python paths inside the venv
+                if os.name == 'nt':
+                    pip_path = os.path.join(venv_dir, 'Scripts', 'pip.exe')
+                    py_path = os.path.join(venv_dir, 'Scripts', 'python.exe')
+                else:
+                    pip_path = os.path.join(venv_dir, 'bin', 'pip')
+                    py_path = os.path.join(venv_dir, 'bin', 'python')
+
+                # Set PIP cache dir inside temp directory to keep everything ephemeral
+                cache_dir = os.path.join(TEMP_DIR, 'pip_cache')
+                env = os.environ.copy()
+                env['PIP_CACHE_DIR'] = cache_dir
+
+                for dep in requires:
+                    print(f"  - Installing {dep}")
+                    try:
+                        subprocess.run([pip_path, 'install', dep], check=True, capture_output=True, text=True, env=env)
+                    except subprocess.CalledProcessError as e:
+                        print(f"[!] Failed to install {dep}: {e.stderr}")
+                        # Continue anyway? Or exit? We'll warn and continue; maybe some deps are optional.
+                        print("[!] The script may fail due to missing dependencies.")
+
+                # Add venv site-packages to sys.path
+                try:
+                    result = subprocess.run([py_path, '-c', "import site; print(';'.join(site.getsitepackages()))"],
+                                            capture_output=True, text=True, env=env)
+                    if result.returncode == 0:
+                        site_packages = result.stdout.strip().split(';')
+                        for sp in site_packages:
+                            if sp not in sys.path:
+                                sys.path.append(sp)
+                except Exception:
+                    # Fallback: add known location
+                    if os.name == 'nt':
+                        lib_path = os.path.join(venv_dir, 'Lib', 'site-packages')
+                    else:
+                        # e.g., .venv/lib/python3.x/site-packages
+                        import sysconfig
+                        lib_path = os.path.join(venv_dir, 'lib', f'python{sys.version_info.major}.{sys.version_info.minor}', 'site-packages')
+                    if os.path.isdir(lib_path) and lib_path not in sys.path:
+                        sys.path.append(lib_path)
+                print("[+] Dependencies installed.")
+            else:
+                print(f"[!] This project requires external dependencies: {', '.join(requires)}")
+                print("[!] Use --allow-deps to install them in a temporary venv.")
+                print("[!] The script may fail if these are not already installed globally.")
+
+        # Load the main module (first .py file found, preferring main.py)
+        main_candidates = [f for f in os.listdir(TEMP_DIR) if f.endswith('.py')]
+        main_script = next((f for f in main_candidates if f == 'main.py'), main_candidates[0] if main_candidates else None)
+        if main_script:
+            module_name = os.path.splitext(main_script)[0]
+            spec = importlib.util.spec_from_file_location(module_name, os.path.join(TEMP_DIR, main_script))
+            TARGET_MODULE = importlib.util.module_from_spec(spec)
+            try:
+                spec.loader.exec_module(TARGET_MODULE)
+                print(f"[+] Loaded module '{module_name}' from codebase.")
+            except Exception as e:
+                print(f"[!] Warning: could not execute module: {e}")
+        else:
+            print("[!] No Python files found in the downloaded bundle.")
+            sys.exit(1)
 
         bind_ip = "127.0.0.1"
 
-    # --- DEFAULT MODE & MODE 1 ---
+    # --- DEFAULT MODE & MODE 1 (Master) ---
     else:
         if not args.script:
             parser.print_help()
             sys.exit(1)
 
-        with open(args.script, "r") as f:
+        script_path = os.path.abspath(args.script)
+        PROJECT_DIR = os.path.dirname(script_path)
+
+        with open(script_path, "r") as f:
             script_content = f.read()
         ast_tree = ast.parse(script_content)
         parser_obj = UpgradedUIParser()
         parser_obj.visit(ast_tree)
 
         try:
-            module_name = os.path.splitext(os.path.basename(args.script))[0]
-            spec = importlib.util.spec_from_file_location(module_name, args.script)
+            module_name = os.path.splitext(os.path.basename(script_path))[0]
+            spec = importlib.util.spec_from_file_location(module_name, script_path)
             TARGET_MODULE = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(TARGET_MODULE)
         except Exception as e:
@@ -373,13 +514,13 @@ def main():
         else:
             bind_ip = "127.0.0.1"
 
-    # Temp script cleanup
-    if TEMP_SCRIPT_FILE and not args.keep_script:
-        def cleanup_temp():
-            if os.path.exists(TEMP_SCRIPT_FILE):
-                os.unlink(TEMP_SCRIPT_FILE)
-                print(f"[-] Temporary script {TEMP_SCRIPT_FILE} deleted.")
-        atexit.register(cleanup_temp)
+    # Temp codebase cleanup
+    if TEMP_DIR and not args.keep_script:
+        def cleanup_temp_dir():
+            if os.path.exists(TEMP_DIR):
+                shutil.rmtree(TEMP_DIR)
+                print(f"[-] Temporary codebase {TEMP_DIR} deleted.")
+        atexit.register(cleanup_temp_dir)
 
     # SSL context generation
     ssl_context = None
@@ -391,11 +532,9 @@ def main():
             sys.exit(1)
         try:
             ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            # Generate self‑signed cert (returns (cert_pem, key_pem))
             cert_pem, key_pem = ssl_context.generate_self_signed_certificate(
                 ("localhost",), valid_days=365
             )
-            # Write to temp files (the TCPServer needs file paths)
             cert_file = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.pem')
             cert_file.write(cert_pem)
             cert_file.close()
@@ -404,7 +543,6 @@ def main():
             key_file.close()
             ssl_context.load_cert_chain(cert_file.name, key_file.name)
 
-            # Print certificate fingerprint for user verification
             cert_der = ssl.PEM_cert_to_DER_cert(cert_pem)
             fingerprint = hashlib.sha256(cert_der).hexdigest()
             print(f"[*] Self‑signed certificate SHA256 fingerprint: {fingerprint}")
@@ -419,10 +557,8 @@ def main():
 
     try:
         with ThreadedTCPServer((bind_ip, PORT), EphemeralServer) as httpd:
-            httpd.script_content = script_content if 'script_content' in locals() else ""
             httpd.verbose = args.verbose
 
-            # Wrap socket for SSL if needed
             if ssl_context:
                 httpd.socket = ssl_context.wrap_socket(httpd.socket, server_side=True)
 
@@ -449,7 +585,6 @@ def main():
         print(f"[!] Could not start server: {e}")
         sys.exit(1)
     finally:
-        # Clean up temp cert/key files
         if cert_file:
             os.unlink(cert_file.name)
         if key_file:
