@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pybro Dashboard</title>
+    <style>
+        :root {
+            --bg: #0b0f19;
+            --surface: #131a2b;
+            --border: #2a3350;
+            --text: #e0e6f0;
+            --accent: #6e8efb;
+            --green: #00e676;
+            --red: #ff5252;
+            --radius: 12px;
+            --shadow: 0 8px 24px rgba(0,0,0,0.6);
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            padding: 2rem;
+            max-width: 960px;
+            margin: 0 auto;
+            line-height: 1.5;
+        }
+        h1 {
+            color: var(--accent);
+            font-weight: 600;
+            font-size: 1.9rem;
+            margin-bottom: 1.2rem;
+            border-bottom: 2px solid var(--border);
+            padding-bottom: 0.5rem;
+        }
+        .ui-row {
+            display: flex;
+            gap: 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+        .ui-row > * { flex: 1; min-width: 0; }
+        .component {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 1.2rem;
+            margin-bottom: 1.5rem;
+            box-shadow: var(--shadow);
+        }
+        label {
+            display: block;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+            color: #a0b3d9;
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        input, select, textarea {
+            width: 100%;
+            padding: 0.75rem 1rem;
+            background: #1a2236;
+            border: 1px solid var(--border);
+            color: var(--text);
+            border-radius: 8px;
+            font-family: 'Fira Code', monospace;
+            font-size: 0.95rem;
+            transition: border-color 0.2s;
+        }
+        input:focus, select:focus, textarea:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 2px rgba(110,142,251,0.3);
+        }
+        textarea {
+            height: 120px;
+            resize: vertical;
+            background: #0a0f1c;
+            color: var(--green);
+            font-family: 'Fira Code', monospace;
+            line-height: 1.4;
+        }
+        button {
+            background: linear-gradient(135deg, #2d3b5a 0%, #1a2740 100%);
+            color: #fff;
+            padding: 0.75rem 1.5rem;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 0.95rem;
+            transition: all 0.2s;
+        }
+        button:hover {
+            background: linear-gradient(135deg, #3f5182 0%, #2a3a5e 100%);
+            border-color: var(--accent);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(110,142,251,0.3);
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: var(--surface);
+            border-radius: var(--radius);
+            overflow: hidden;
+        }
+        th, td {
+            padding: 0.9rem 1rem;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+        th {
+            background: #1e2a44;
+            color: var(--accent);
+            font-weight: 600;
+        }
+        .terminal {
+            background: #0a0f1c;
+            border: 1px solid var(--border);
+            padding: 1rem;
+            border-radius: 8px;
+            white-space: pre-wrap;
+            color: var(--green);
+            font-family: 'Fira Code', monospace;
+            min-height: 60px;
+            margin-top: 0.5rem;
+        }
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: rgba(0,0,0,0.85);
+            align-items: center;
+            justify-content: center;
+        }
+        .modal-content {
+            background: var(--surface);
+            border: 2px solid var(--red);
+            padding: 2rem;
+            border-radius: var(--radius);
+            max-width: 500px;
+            width: 90%;
+        }
+    </style>
+</head>
+<body>
+    <div id="app-canvas"></div>
+
+    <div id="gatekeeper-modal" class="modal">
+        <div class="modal-content">
+            <h3 style="color:var(--red); margin-top: 0;">⚠️ ACCESS AUTHORIZATION REQUIRED</h3>
+            <p><strong>Intent Vector:</strong> <span id="gate-desc"></span></p>
+            <p><strong>Payload Target String:</strong> <code id="gate-cmd" style="background:#0a0f1c; padding:8px; display:block; margin-top:8px; color:var(--green)"></code></p>
+            <div style="display: flex; justify-content: flex-end; gap: 1rem; margin-top: 1.5rem;">
+                <button id="gate-deny-btn">Deny</button>
+                <button id="gate-approve-btn" style="background: var(--red); color:#fff;">Approve</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let pendingCommand = null;
+        let globalMathFormulas = [];
+        let callbackButtons = {};
+
+        // Auth
+        const urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.has('key')) {
+            sessionStorage.setItem('pybro_session_token', urlParams.get('key'));
+        }
+
+        function getAuthHeaders() {
+            const token = sessionStorage.getItem('pybro_session_token');
+            return token ? { 'X-Pybro-Key': token, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
+        }
+
+        function getFormState() {
+            const state = {};
+            document.querySelectorAll('input, select').forEach(el => {
+                if(el.id) state[el.id] = el.type === 'checkbox' ? el.checked : el.value;
+            });
+            return state;
+        }
+
+        // Reactive math
+        function evaluateReactiveMath() {
+            const state = getFormState();
+            globalMathFormulas.forEach(formulaObj => {
+                const targetElement = document.getElementById(formulaObj.target_id);
+                if (!targetElement) return;
+                let expression = formulaObj.formula;
+                Object.keys(state).forEach(key => {
+                    const val = parseFloat(state[key]) || 0;
+                    expression = expression.replaceAll(`{${key}}`, val);
+                });
+                try {
+                    const result = Function("\"use strict\"; return (" + expression + ")")();
+                    if(targetElement.tagName === 'INPUT' || targetElement.tagName === 'TEXTAREA') targetElement.value = result;
+                    else targetElement.innerText = result;
+                } catch(e) { targetElement.innerText = "[Math Error]"; }
+            });
+        }
+
+        // Helpers for applying CSS
+        function applyRootCSS(cssVars) {
+            const root = document.documentElement;
+            for (const [prop, value] of Object.entries(cssVars)) {
+                root.style.setProperty(prop, value);
+            }
+        }
+
+        function applyComponentCSS(wrapper, token) {
+            if (token.css) {
+                for (const [prop, value] of Object.entries(token.css)) {
+                    wrapper.style.setProperty(prop, value);
+                }
+            }
+            if (token.class) {
+                wrapper.classList.add(token.class);
+            }
+        }
+
+        // Bi‑directional state sharing
+        function syncFormStateToServer() {
+            const state = getFormState();
+            fetch('/broadcast_state', {
+                method: 'POST',
+                headers: getAuthHeaders(),
+                body: JSON.stringify({ form_state: state })
+            }).catch(() => {});
+        }
+
+        // Build UI from tokens
+        async function initRuntime() {
+            const canvas = document.getElementById('app-canvas');
+            const targetUrl = '/tokens' + window.location.search;
+            try {
+                const res = await fetch(targetUrl, { headers: getAuthHeaders() });
+                if (res.status === 401) {
+                    canvas.innerHTML = `<h2 style="color:var(--red)">⚠️ Access Denied: Invalid Security Token</h2>`;
+                    return;
+                }
+                const tokens = await res.json();
+
+                // Apply root CSS if present
+                const rootToken = tokens.find(t => t.type === "UI_ROOT_CSS");
+                if (rootToken) {
+                    applyRootCSS(rootToken.css_vars);
+                }
+
+                let currentContainer = canvas;
+
+                tokens.forEach(tok => {
+                    if (tok.type === "LAYOUT_ROW_START") {
+                        const row = document.createElement('div'); row.className = "ui-row";
+                        applyComponentCSS(row, tok);
+                        canvas.appendChild(row);
+                        currentContainer = row;
+                        return;
+                    }
+                    if (tok.type === "LAYOUT_ROW_END") {
+                        currentContainer = canvas;
+                        return;
+                    }
+                    if (tok.type === "UI_ROOT_CSS") return;
+
+                    const wrapper = document.createElement('div');
+                    wrapper.className = "component";
+                    applyComponentCSS(wrapper, tok);
+
+                    switch(tok.type) {
+                        case "UI_TITLE":
+                            const h = document.createElement('h1');
+                            h.innerText = tok.text;
+                            if (tok.css) { for (const [p,v] of Object.entries(tok.css)) h.style.setProperty(p,v); }
+                            if (tok.class) h.classList.add(tok.class);
+                            currentContainer.appendChild(h);
+                            return;
+                        case "UI_INPUT":
+                            wrapper.innerHTML = `<label>${tok.label}</label><input id="${tok.id}" type="text" oninput="evaluateReactiveMath(); syncFormStateToServer()">`;
+                            break;
+                        case "UI_CHECKBOX":
+                            wrapper.innerHTML = `<label style="display:flex; align-items:center; gap:8px;"><input id="${tok.id}" type="checkbox" onchange="evaluateReactiveMath(); syncFormStateToServer()"> ${tok.label}</label>`;
+                            break;
+                        case "UI_DROPDOWN":
+                            const optionsHTML = tok.options.map(o => `<option value="${o}">${o}</option>`).join('');
+                            wrapper.innerHTML = `<label>${tok.label}</label><select id="${tok.id}" onchange="evaluateReactiveMath(); syncFormStateToServer()">${optionsHTML}</select>`;
+                            break;
+                        case "UI_TEXT_AREA":
+                            wrapper.innerHTML = `<label>${tok.label}</label><textarea id="${tok.id}" readonly>System Idle...</textarea>`;
+                            break;
+                        case "UI_CALLBACK_BUTTON":
+                            callbackButtons[tok.callback_name] = tok.target_id || null;
+                            wrapper.innerHTML = `<button data-callback="${tok.callback_name}">${tok.text}</button>`;
+                            break;
+                        case "UI_MATH_COMPUTE":
+                            globalMathFormulas.push(tok);
+                            return;
+                        case "OS_GATEKEEPER":
+                            wrapper.innerHTML = `
+                                <button data-os-cmd="${encodeURIComponent(tok.cmd)}" data-os-desc="${encodeURIComponent(tok.desc)}" data-os-target="${tok.target_id}">Execute Script Hook</button>
+                                <label style="margin-top:10px;">System Buffer Output:</label>
+                                <div id="${tok.target_id}" class="terminal">Console idle.</div>`;
+                            break;
+                        case "UI_TABLE":
+                            const ths = tok.headers.map(h => `<th>${h}</th>`).join('');
+                            const trs = tok.rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('');
+                            wrapper.innerHTML = `<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
+                            break;
+                    }
+                    currentContainer.appendChild(wrapper);
+                });
+
+                // Attach event listeners after all elements exist
+                attachGlobalListeners();
+                evaluateReactiveMath();
+            } catch(e) { canvas.innerHTML = `<h2 style="color:var(--red)">Mount Exception: ${e}</h2>`; }
+        }
+
+        function attachGlobalListeners() {
+            // OS command buttons
+            document.querySelectorAll('button[data-os-cmd]').forEach(btn => {
+                btn.addEventListener('click', function() {
+                    const cmd = decodeURIComponent(this.dataset.osCmd);
+                    const desc = decodeURIComponent(this.dataset.osDesc);
+                    const target = this.dataset.osTarget;
+                    openGatekeeper(cmd, desc, target);
+                });
+            });
+
+            // Callback buttons
+            document.querySelectorAll('button[data-callback]').forEach(btn => {
+                btn.addEventListener('click', function() {
+                    firePythonCallback(this.dataset.callback);
+                });
+            });
+
+            // Gatekeeper modal buttons
+            document.getElementById('gate-approve-btn').addEventListener('click', () => resolveGatekeeper(true));
+            document.getElementById('gate-deny-btn').addEventListener('click', () => resolveGatekeeper(false));
+        }
+
+        function updateTarget(output, target_id) {
+            if (target_id) {
+                const el = document.getElementById(target_id);
+                if (el) {
+                    if (el.tagName === 'TEXTAREA') el.value = output;
+                    else el.innerText = output;
+                }
+            } else {
+                const first = document.querySelector('textarea, .terminal');
+                if (first) {
+                    if (first.tagName === 'TEXTAREA') first.value = output;
+                    else first.innerText = output;
+                }
+            }
+        }
+
+        async function firePythonCallback(name) {
+            const target_id = callbackButtons[name] || null;
+            updateTarget("[*] Dispatching callback...", target_id);
+
+            const res = await fetch('/trigger_callback', {
+                method: 'POST',
+                headers: getAuthHeaders(),
+                body: JSON.stringify({ callback_name: name, form_state: getFormState(), target_id: target_id })
+            });
+            const data = await res.json();
+            updateTarget(data.output, data.target_id || target_id);
+        }
+
+        function openGatekeeper(cmd, desc, targetId) {
+            pendingCommand = { cmd, targetId };
+            document.getElementById('gate-desc').innerText = desc;
+            document.getElementById('gate-cmd').innerText = cmd;
+            document.getElementById('gatekeeper-modal').style.display = 'flex';
+        }
+
+        async function resolveGatekeeper(allowed) {
+            document.getElementById('gatekeeper-modal').style.display = 'none';
+            if (!allowed || !pendingCommand) return;
+            const res = await fetch('/execute_os', {
+                method: 'POST',
+                headers: getAuthHeaders(),
+                body: JSON.stringify({ cmd: pendingCommand.cmd, target_id: pendingCommand.targetId })
+            });
+            const data = await res.json();
+            updateTarget(data.output, data.target_id || pendingCommand.targetId);
+        }
+
+        // Apply received form state from SSE (bi‑directional sync)
+        function applyRemoteState(newState) {
+            Object.entries(newState).forEach(([key, value]) => {
+                const el = document.getElementById(key);
+                if (!el) return;
+                if (el.type === 'checkbox') {
+                    if (el.checked !== value) {
+                        el.checked = value;
+                        evaluateReactiveMath();
+                    }
+                } else {
+                    if (el.value !== value) {
+                        el.value = value;
+                        evaluateReactiveMath();
+                    }
+                }
+            });
+        }
+
+        // SSE: real‑time updates + state sharing
+        function startSSE() {
+            const evtSource = new EventSource('/stream');
+            evtSource.addEventListener('callback_output', e => {
+                const data = JSON.parse(e.data);
+                updateTarget(data.output, data.target_id);
+            });
+            evtSource.addEventListener('command_output', e => {
+                const data = JSON.parse(e.data);
+                updateTarget(data.output, data.target_id);
+            });
+            evtSource.addEventListener('state_update', e => {
+                const state = JSON.parse(e.data);
+                applyRemoteState(state);
+            });
+            evtSource.onerror = () => {
+                evtSource.close();
+                setTimeout(startSSE, 3000);
+            };
+        }
+
+        window.onload = () => {
+            initRuntime();
+            startSSE();
+        };
+    </script>
+</body>
+</html>
