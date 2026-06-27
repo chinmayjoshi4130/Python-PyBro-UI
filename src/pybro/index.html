@@ -176,7 +176,11 @@
         let pendingCommand = null;
         let globalMathFormulas = [];
         let callbackButtons = {};
-        let activeStreams = {};   // track streaming outputs: stream_id -> { target_id, content }
+        let activeStreams = {};
+        let currentTokens = [];          // store the last known token snapshot
+
+        // ---------- form state preservation ----------
+        let savedFormState = {};
 
         const urlParams = new URLSearchParams(window.location.search);
         if (urlParams.has('key')) {
@@ -201,6 +205,24 @@
                 if(el.id) state[el.id] = el.type === 'checkbox' ? el.checked : el.value;
             });
             return state;
+        }
+
+        // Save current form values before we destroy the DOM
+        function captureFormState() {
+            savedFormState = getFormState();
+        }
+
+        // Apply saved values to the newly created inputs
+        function restoreFormState() {
+            Object.entries(savedFormState).forEach(([key, value]) => {
+                const el = document.getElementById(key);
+                if (!el) return;
+                if (el.type === 'checkbox') {
+                    el.checked = value;
+                } else {
+                    el.value = value;
+                }
+            });
         }
 
         function evaluateReactiveMath() {
@@ -255,8 +277,13 @@
         }
 
         async function initRuntime() {
+            // 1. Save scroll position
+            const scrollY = window.scrollY;
+            // 2. Capture form values before destroying DOM
+            captureFormState();
+
             const canvas = document.getElementById('app-canvas');
-            canvas.innerHTML = '';  // clear previous UI
+            canvas.innerHTML = '';
             const targetUrl = '/tokens' + window.location.search;
             try {
                 const res = await fetch(targetUrl, { headers: getAuthHeaders() });
@@ -269,8 +296,9 @@
                     return;
                 }
                 const tokens = await res.json();
+                currentTokens = tokens;
 
-                globalMathFormulas = [];  // reset math formulas
+                globalMathFormulas = [];
                 callbackButtons = {};
 
                 const rootToken = tokens.find(t => t.type === "UI_ROOT_CSS");
@@ -307,27 +335,27 @@
                             currentContainer.appendChild(h);
                             return;
                         case "UI_INPUT":
-                            wrapper.innerHTML = `<label>${tok.label}</label><input id="${tok.id}" type="text" oninput="evaluateReactiveMath(); debouncedSyncFormState()">`;
+                            wrapper.innerHTML += `<label>${tok.label}</label><input id="${tok.id}" type="text" oninput="evaluateReactiveMath(); debouncedSyncFormState()">`;
                             break;
                         case "UI_CHECKBOX":
-                            wrapper.innerHTML = `<label style="display:flex; align-items:center; gap:8px;"><input id="${tok.id}" type="checkbox" onchange="evaluateReactiveMath(); debouncedSyncFormState()"> ${tok.label}</label>`;
+                            wrapper.innerHTML += `<label style="display:flex; align-items:center; gap:8px;"><input id="${tok.id}" type="checkbox" onchange="evaluateReactiveMath(); debouncedSyncFormState()"> ${tok.label}</label>`;
                             break;
                         case "UI_DROPDOWN":
                             const optionsHTML = tok.options.map(o => `<option value="${o}">${o}</option>`).join('');
-                            wrapper.innerHTML = `<label>${tok.label}</label><select id="${tok.id}" onchange="evaluateReactiveMath(); debouncedSyncFormState()">${optionsHTML}</select>`;
+                            wrapper.innerHTML += `<label>${tok.label}</label><select id="${tok.id}" onchange="evaluateReactiveMath(); debouncedSyncFormState()">${optionsHTML}</select>`;
                             break;
                         case "UI_TEXT_AREA":
-                            wrapper.innerHTML = `<label>${tok.label}</label><textarea id="${tok.id}" readonly>System Idle...</textarea>`;
+                            wrapper.innerHTML += `<label>${tok.label}</label><textarea id="${tok.id}" readonly>System Idle...</textarea>`;
                             break;
                         case "UI_CALLBACK_BUTTON":
                             callbackButtons[tok.callback_name] = tok.target_id || null;
-                            wrapper.innerHTML = `<button type="button" data-callback="${tok.callback_name}">${tok.text}</button>`;
+                            wrapper.innerHTML += `<button type="button" data-callback="${tok.callback_name}">${tok.text}</button>`;
                             break;
                         case "UI_MATH_COMPUTE":
                             globalMathFormulas.push(tok);
                             return;
                         case "OS_GATEKEEPER":
-                            wrapper.innerHTML = `
+                            wrapper.innerHTML += `
                                 <button type="button" data-os-cmd="${encodeURIComponent(tok.cmd)}" data-os-desc="${encodeURIComponent(tok.desc)}" data-os-target="${tok.target_id}">Execute Script Hook</button>
                                 <label style="margin-top:10px;">System Buffer Output:</label>
                                 <div id="${tok.target_id}" class="terminal">Console idle.</div>`;
@@ -349,14 +377,19 @@
                                 }).join('');
                                 tableHtml = `<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
                             }
-                            wrapper.innerHTML = tableHtml;
+                            wrapper.innerHTML += tableHtml;
                             break;
                     }
                     currentContainer.appendChild(wrapper);
                 });
 
+                // 3. Restore form values
+                restoreFormState();
+                // 4. Re-attach listeners and re-evaluate math
                 attachGlobalListeners();
                 evaluateReactiveMath();
+                // 5. Restore scroll position
+                window.scrollTo(0, scrollY);
             } catch(e) {
                 canvas.innerHTML = `<h2 style="color:var(--red)">Mount Exception: ${e.message || e}</h2>`;
             }
@@ -398,13 +431,6 @@
             }
         }
 
-        // Stream management for OS commands
-        function startOsStream(target_id) {
-            // Mark the target as streaming, clear previous content
-            updateTarget("", target_id);
-            return target_id;
-        }
-
         function appendStreamChunk(stream_id, text) {
             const stream = activeStreams[stream_id];
             if (!stream) return;
@@ -415,7 +441,6 @@
             } else {
                 target.innerText += text + "\n";
             }
-            // Auto-scroll to bottom
             target.scrollTop = target.scrollHeight;
         }
 
@@ -443,12 +468,10 @@
 
             const data = await res.json();
             if (data.stream_id) {
-                // Start streaming – the SSE events will handle the output
                 const stream_id = data.stream_id;
                 activeStreams[stream_id] = { target_id: data.target_id || pendingCommand.targetId };
                 updateTarget("Waiting for output...", data.target_id);
             } else {
-                // Fallback in case no streaming (should not happen)
                 updateTarget(data.error || "Unknown error.", pendingCommand.targetId);
             }
             pendingCommand = null;
@@ -486,6 +509,8 @@
             evaluateReactiveMath();
         }
 
+        // ================ SSE + Polling ================
+
         function startSSE() {
             const evtSource = new EventSource('/stream');
             const statusDot = document.getElementById('sse-status');
@@ -499,7 +524,6 @@
                 updateTarget(data.output, data.target_id);
             });
 
-            // New streaming events
             evtSource.addEventListener('os_output_chunk', e => {
                 const data = JSON.parse(e.data);
                 if (data.stream_id && activeStreams[data.stream_id]) {
@@ -519,9 +543,7 @@
                 applyRemoteState(state);
             });
 
-            evtSource.addEventListener('tokens_updated', e => {
-                // Re‑render the whole UI without page reload
-                console.log("Tokens updated, re‑rendering UI...");
+            evtSource.addEventListener('tokens_updated', () => {
                 initRuntime();
             });
 
@@ -532,9 +554,26 @@
             };
         }
 
+        function startPolling() {
+            setInterval(async () => {
+                try {
+                    const res = await fetch('/tokens' + window.location.search, { headers: getAuthHeaders() });
+                    if (!res.ok) return;
+                    const newTokens = await res.json();
+                    const newSnapshot = JSON.stringify(newTokens);
+                    const currentSnapshot = JSON.stringify(currentTokens);
+                    if (newSnapshot !== currentSnapshot) {
+                        currentTokens = newTokens;
+                        initRuntime();
+                    }
+                } catch (e) {}
+            }, 2000);
+        }
+
         window.onload = () => {
             initRuntime();
             startSSE();
+            startPolling();
         };
     </script>
 </body>

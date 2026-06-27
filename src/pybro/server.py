@@ -21,6 +21,7 @@ import traceback
 import html
 import time
 import uuid
+import types
 
 # --- tomllib / tomli fallback ---
 try:
@@ -138,19 +139,54 @@ def build_token_tree():
 
 # ---------- AST Parser ----------
 class PybroUIParser(ast.NodeVisitor):
-    """Walk the user script and extract UI tokens into COMPILED_TOKENS."""
-    def __init__(self):
+    """
+    Walk the user script and extract UI tokens into COMPILED_TOKENS.
+    If a module is provided, function calls in assignments are evaluated
+    and their return values stored in the variable table.
+    """
+    def __init__(self, module=None):
         self.var_table = {}
+        self.module = module
+
+    def _safe_eval(self, node):
+        """Evaluate an AST expression node safely, using the module's namespace if available."""
+        if isinstance(node, ast.Constant):
+            return node.value
+        if isinstance(node, ast.Name):
+            if node.id in self.var_table:
+                return self.var_table[node.id]
+            if self.module and hasattr(self.module, node.id):
+                return getattr(self.module, node.id)
+            return node.id
+        if isinstance(node, ast.Call):
+            func = None
+            if isinstance(node.func, ast.Name):
+                func_name = node.func.id
+                if self.module and hasattr(self.module, func_name):
+                    func = getattr(self.module, func_name)
+            elif isinstance(node.func, ast.Attribute):
+                # For module.func() style, not implemented here but could be added
+                pass
+            if callable(func):
+                args = [self._safe_eval(a) for a in node.args]
+                kwargs = {kw.arg: self._safe_eval(kw.value) for kw in node.keywords}
+                try:
+                    return func(*args, **kwargs)
+                except Exception:
+                    pass
+        try:
+            return ast.literal_eval(node)
+        except ValueError:
+            return None
 
     def visit_Module(self, node):
+        # First pass: collect assignments with callable values
         for stmt in node.body:
             if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
                 target = stmt.targets[0]
                 if isinstance(target, ast.Name):
-                    try:
-                        self.var_table[target.id] = ast.literal_eval(stmt.value)
-                    except ValueError:
-                        pass
+                    value = self._safe_eval(stmt.value)
+                    self.var_table[target.id] = value
         self.generic_visit(node)
 
     def visit_Call(self, node):
@@ -167,9 +203,12 @@ class PybroUIParser(ast.NodeVisitor):
                                 args.append(self.var_table[arg.id])
                             else:
                                 args.append(arg.id)
+                        elif isinstance(arg, ast.Call):
+                            val = self._safe_eval(arg)
+                            args.append(val)
                         else:
                             args.append(None)
-    
+
                 kwargs = {}
                 for kw in node.keywords:
                     if kw.arg == 'css':
@@ -187,7 +226,7 @@ class PybroUIParser(ast.NodeVisitor):
                             kwargs['target_id'] = ast.literal_eval(kw.value)
                         except Exception:
                             kwargs['target_id'] = None
-    
+
                 token = None
                 if func_name == 'title' and args:
                     token = {"type": "UI_TITLE", "text": args[0]}
@@ -218,7 +257,7 @@ class PybroUIParser(ast.NodeVisitor):
                     token = {"type": "UI_ROOT_CSS", "css_vars": args[0]}
                 else:
                     token = None
-    
+
                 if token is not None:
                     if 'css' in kwargs:
                         token['css'] = kwargs['css']
@@ -241,7 +280,6 @@ def stream_os_command(cmd, stream_id, target_id, timeout):
             bufsize=1
         )
 
-        # Read line by line with timeout
         def read_output():
             try:
                 for line in iter(process.stdout.readline, ''):
@@ -274,7 +312,6 @@ def stream_os_command(cmd, stream_id, target_id, timeout):
                     "final": html.escape(f"\n[!] Unexpected error: {str(e)}")
                 })
         threading.Thread(target=read_output, daemon=True).start()
-
     except Exception as e:
         broadcast_event("os_output_done", {
             "stream_id": stream_id,
@@ -312,6 +349,9 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
                 return
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
+            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Expires', '0')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps(COMPILED_TOKENS).encode())
@@ -425,14 +465,12 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
 
             stream_id = str(uuid.uuid4())
             timeout = getattr(self.server, 'os_timeout', 5)
-            # Start streaming in background
             threading.Thread(
                 target=stream_os_command,
                 args=(requested_cmd, stream_id, target_id, timeout),
                 daemon=True
             ).start()
 
-            # Immediately return the stream_id
             self.send_response(202)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
@@ -447,7 +485,50 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
             if is_registered and TARGET_MODULE and hasattr(TARGET_MODULE, func_name):
                 try:
                     target_function = getattr(TARGET_MODULE, func_name)
-                    response_text = str(target_function(form_state))
+                    result = target_function(form_state)
+
+                    token_patches = None
+                    if isinstance(result, list):
+                        token_patches = result
+                    elif isinstance(result, dict) and 'patches' in result:
+                        token_patches = result['patches']
+
+                    if token_patches:
+                        try:
+                            for patch in token_patches:
+                                action = patch.get('action')
+                                idx = int(patch.get('token_index', -1))
+                                if idx < 0 or idx >= len(COMPILED_TOKENS):
+                                    continue
+                                token = COMPILED_TOKENS[idx]
+                                if action == 'set_text':
+                                    token['text'] = str(patch.get('value', ''))
+                                elif action == 'set_label':
+                                    token['label'] = str(patch.get('value', ''))
+                                elif action == 'set_css':
+                                    if isinstance(patch.get('value'), dict):
+                                        token['css'] = patch['value']
+                                elif action == 'set_class':
+                                    token['class'] = str(patch.get('value', ''))
+                                elif action == 'insert_table_row':
+                                    if token['type'] == 'UI_TABLE':
+                                        row = patch.get('row', [])
+                                        token['rows'].append(row)
+                                elif action == 'set_table_rows':
+                                    if token['type'] == 'UI_TABLE':
+                                        token['rows'] = patch.get('rows', [])
+                                elif action == 'set_options':
+                                    if token['type'] == 'UI_DROPDOWN':
+                                        token['options'] = patch.get('options', [])
+                        except Exception as e:
+                            print(f"[!] Error applying token patches: {e}")
+                            traceback.print_exc()
+
+                        broadcast_event("tokens_updated", json.dumps(COMPILED_TOKENS))
+                        response_text = "UI updated"
+                    else:
+                        response_text = str(result)
+
                 except Exception as e:
                     response_text = f"Callback Error: {str(e)}"
                     traceback.print_exc()
@@ -459,11 +540,13 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps(resp).encode())
-            broadcast_event("callback_output", resp)
+            if response_text != "UI updated":
+                broadcast_event("callback_output", resp)
 
 
 def watch_script(script_path):
     """Poll the script file for changes and re‑compile tokens."""
+    global COMPILED_TOKENS, TARGET_MODULE, PROJECT_TOKEN_TREE
     last_mtime = os.path.getmtime(script_path)
     while True:
         time.sleep(2)
@@ -473,12 +556,10 @@ def watch_script(script_path):
                 print("[*] Script change detected. Re‑compiling...")
                 with open(script_path, "r") as f:
                     ast_tree = ast.parse(f.read())
-                global COMPILED_TOKENS
-                COMPILED_TOKENS = []  # reset
-                parser_obj = PybroUIParser()
+                COMPILED_TOKENS = []
+                parser_obj = PybroUIParser(module=TARGET_MODULE)
                 parser_obj.visit(ast_tree)
-                # Also re-import the module so callbacks are updated
-                global TARGET_MODULE
+                # Re-import the module so callbacks are updated
                 module_name = os.path.splitext(os.path.basename(script_path))[0]
                 spec = importlib.util.spec_from_file_location(module_name, script_path)
                 TARGET_MODULE = importlib.util.module_from_spec(spec)
@@ -486,11 +567,9 @@ def watch_script(script_path):
                     spec.loader.exec_module(TARGET_MODULE)
                 except Exception as e:
                     print(f"[!] Warning: could not reload module: {e}")
-                # If in shared+connectable mode, rebuild token tree
                 if PROJECT_DIR and SESSION_KEY and getattr(args, 'connectable', False):
                     build_token_tree()
-                # Notify all SSE clients to refresh UI
-                broadcast_event("tokens_updated", {"message": "UI tokens reloaded"})
+                broadcast_event("tokens_updated", json.dumps(COMPILED_TOKENS))
                 print("[+] Re‑compile successful. UI refreshed.")
                 last_mtime = current_mtime
         except FileNotFoundError:
@@ -687,19 +766,19 @@ def main():
         if PROJECT_DIR not in sys.path:
             sys.path.insert(0, PROJECT_DIR)
 
-        with open(script_path, "r") as f:
-            ast_tree = ast.parse(f.read())
-        parser_obj = PybroUIParser()
-        parser_obj.visit(ast_tree)
-
+        module_name = os.path.splitext(os.path.basename(script_path))[0]
+        spec = importlib.util.spec_from_file_location(module_name, script_path)
+        TARGET_MODULE = importlib.util.module_from_spec(spec)
         try:
-            module_name = os.path.splitext(os.path.basename(script_path))[0]
-            spec = importlib.util.spec_from_file_location(module_name, script_path)
-            TARGET_MODULE = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(TARGET_MODULE)
         except Exception as e:
             print(f"[!] Target callback module linking unavailable: {e}")
             traceback.print_exc()
+
+        with open(script_path, "r") as f:
+            ast_tree = ast.parse(f.read())
+        parser_obj = PybroUIParser(module=TARGET_MODULE)
+        parser_obj.visit(ast_tree)
 
         if args.shared:
             bind_ip = "0.0.0.0"
@@ -804,7 +883,6 @@ def main():
                 if not args.connect:
                     webbrowser.open(f"{protocol}://localhost:{port}")
 
-            # Start file watcher if requested (master mode only)
             if args.watch and not args.connect:
                 print("[*] Starting file watcher on", script_path)
                 threading.Thread(target=watch_script, args=(script_path,), daemon=True).start()
