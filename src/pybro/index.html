@@ -143,9 +143,21 @@
             max-width: 500px;
             width: 90%;
         }
+        #sse-status {
+            position: fixed;
+            top: 15px;
+            right: 15px;
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: gray;
+            transition: background 0.2s;
+            z-index: 100;
+        }
     </style>
 </head>
 <body>
+    <div id="sse-status" title="SSE connection status"></div>
     <div id="app-canvas"></div>
 
     <div id="gatekeeper-modal" class="modal">
@@ -164,15 +176,22 @@
         let pendingCommand = null;
         let globalMathFormulas = [];
         let callbackButtons = {};
+        let activeStreams = {};   // track streaming outputs: stream_id -> { target_id, content }
 
-        // Auth
         const urlParams = new URLSearchParams(window.location.search);
         if (urlParams.has('key')) {
-            sessionStorage.setItem('pybro_session_token', urlParams.get('key'));
+            try {
+                sessionStorage.setItem('pybro_session_token', urlParams.get('key'));
+            } catch (e) {
+                console.warn("sessionStorage not available – key will only be used for this session.");
+            }
         }
 
         function getAuthHeaders() {
-            const token = sessionStorage.getItem('pybro_session_token');
+            let token = null;
+            try {
+                token = sessionStorage.getItem('pybro_session_token');
+            } catch (e) {}
             return token ? { 'X-Pybro-Key': token, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
         }
 
@@ -184,7 +203,6 @@
             return state;
         }
 
-        // Reactive math
         function evaluateReactiveMath() {
             const state = getFormState();
             globalMathFormulas.forEach(formulaObj => {
@@ -195,16 +213,6 @@
                     const val = parseFloat(state[key]) || 0;
                     expression = expression.replaceAll(`{${key}}`, val);
                 });
-                // Warn about missing placeholders (still in expression)
-                const unresolved = expression.match(/\{(\w+)\}/g);
-                if (unresolved) {
-                    unresolved.forEach(ph => {
-                        const id = ph.slice(1, -1);
-                        if (!(id in state)) {
-                            console.warn(`Math formula for "${formulaObj.target_id}" references unknown field: ${id}`);
-                        }
-                    });
-                }
                 try {
                     const result = Function("\"use strict\"; return (" + expression + ")")();
                     if(targetElement.tagName === 'INPUT' || targetElement.tagName === 'TEXTAREA') targetElement.value = result;
@@ -213,7 +221,6 @@
             });
         }
 
-        // Helpers for applying CSS
         function applyRootCSS(cssVars) {
             const root = document.documentElement;
             for (const [prop, value] of Object.entries(cssVars)) {
@@ -232,7 +239,6 @@
             }
         }
 
-        // Bi‑directional state sharing – debounced to avoid flooding the server
         let syncTimeout = null;
         function debouncedSyncFormState() {
             clearTimeout(syncTimeout);
@@ -248,9 +254,9 @@
             }).catch(() => {});
         }
 
-        // Build UI from tokens
         async function initRuntime() {
             const canvas = document.getElementById('app-canvas');
+            canvas.innerHTML = '';  // clear previous UI
             const targetUrl = '/tokens' + window.location.search;
             try {
                 const res = await fetch(targetUrl, { headers: getAuthHeaders() });
@@ -258,9 +264,15 @@
                     canvas.innerHTML = `<h2 style="color:var(--red)">⚠️ Access Denied: Invalid Security Token</h2>`;
                     return;
                 }
+                if (!res.ok) {
+                    canvas.innerHTML = `<h2 style="color:var(--red)">Could not load interface. Server returned ${res.status}.</h2>`;
+                    return;
+                }
                 const tokens = await res.json();
 
-                // Apply root CSS if present
+                globalMathFormulas = [];  // reset math formulas
+                callbackButtons = {};
+
                 const rootToken = tokens.find(t => t.type === "UI_ROOT_CSS");
                 if (rootToken) {
                     applyRootCSS(rootToken.css_vars);
@@ -321,22 +333,36 @@
                                 <div id="${tok.target_id}" class="terminal">Console idle.</div>`;
                             break;
                         case "UI_TABLE":
-                            const ths = tok.headers.map(h => `<th>${h}</th>`).join('');
-                            const trs = tok.rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('');
-                            wrapper.innerHTML = `<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
+                            let tableHtml = '';
+                            const headers = tok.headers || [];
+                            const rows = tok.rows || [];
+                            if (headers.length === 0 && rows.length === 0) {
+                                tableHtml = '<p style="padding:1rem;">No data available.</p>';
+                            } else {
+                                const ths = headers.map(h => `<th>${h}</th>`).join('');
+                                const trs = rows.map(r => {
+                                    const cells = [];
+                                    for (let i = 0; i < headers.length; i++) {
+                                        cells.push(`<td>${r[i] !== undefined ? r[i] : ''}</td>`);
+                                    }
+                                    return `<tr>${cells.join('')}</tr>`;
+                                }).join('');
+                                tableHtml = `<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
+                            }
+                            wrapper.innerHTML = tableHtml;
                             break;
                     }
                     currentContainer.appendChild(wrapper);
                 });
 
-                // Attach event listeners after all elements exist
                 attachGlobalListeners();
                 evaluateReactiveMath();
-            } catch(e) { canvas.innerHTML = `<h2 style="color:var(--red)">Mount Exception: ${e}</h2>`; }
+            } catch(e) {
+                canvas.innerHTML = `<h2 style="color:var(--red)">Mount Exception: ${e.message || e}</h2>`;
+            }
         }
 
         function attachGlobalListeners() {
-            // OS command buttons
             document.querySelectorAll('button[data-os-cmd]').forEach(btn => {
                 btn.addEventListener('click', function() {
                     const cmd = decodeURIComponent(this.dataset.osCmd);
@@ -346,14 +372,12 @@
                 });
             });
 
-            // Callback buttons
             document.querySelectorAll('button[data-callback]').forEach(btn => {
                 btn.addEventListener('click', function() {
                     firePythonCallback(this.dataset.callback);
                 });
             });
 
-            // Gatekeeper modal buttons
             document.getElementById('gate-approve-btn').addEventListener('click', () => resolveGatekeeper(true));
             document.getElementById('gate-deny-btn').addEventListener('click', () => resolveGatekeeper(false));
         }
@@ -374,10 +398,65 @@
             }
         }
 
+        // Stream management for OS commands
+        function startOsStream(target_id) {
+            // Mark the target as streaming, clear previous content
+            updateTarget("", target_id);
+            return target_id;
+        }
+
+        function appendStreamChunk(stream_id, text) {
+            const stream = activeStreams[stream_id];
+            if (!stream) return;
+            const target = document.getElementById(stream.target_id);
+            if (!target) return;
+            if (target.tagName === 'TEXTAREA') {
+                target.value += text + "\n";
+            } else {
+                target.innerText += text + "\n";
+            }
+            // Auto-scroll to bottom
+            target.scrollTop = target.scrollHeight;
+        }
+
+        function finishStream(stream_id, finalText, return_code) {
+            const stream = activeStreams[stream_id];
+            if (!stream) return;
+            appendStreamChunk(stream_id, finalText);
+            delete activeStreams[stream_id];
+        }
+
+        async function resolveGatekeeper(allowed) {
+            document.getElementById('gatekeeper-modal').style.display = 'none';
+            if (!allowed || !pendingCommand) return;
+
+            const res = await fetch('/execute_os', {
+                method: 'POST',
+                headers: getAuthHeaders(),
+                body: JSON.stringify({ cmd: pendingCommand.cmd, target_id: pendingCommand.targetId })
+            });
+
+            if (res.status === 403) {
+                updateTarget("Access denied by server.", pendingCommand.targetId);
+                return;
+            }
+
+            const data = await res.json();
+            if (data.stream_id) {
+                // Start streaming – the SSE events will handle the output
+                const stream_id = data.stream_id;
+                activeStreams[stream_id] = { target_id: data.target_id || pendingCommand.targetId };
+                updateTarget("Waiting for output...", data.target_id);
+            } else {
+                // Fallback in case no streaming (should not happen)
+                updateTarget(data.error || "Unknown error.", pendingCommand.targetId);
+            }
+            pendingCommand = null;
+        }
+
         async function firePythonCallback(name) {
             const target_id = callbackButtons[name] || null;
             updateTarget("[*] Dispatching callback...", target_id);
-
             const res = await fetch('/trigger_callback', {
                 method: 'POST',
                 headers: getAuthHeaders(),
@@ -394,53 +473,60 @@
             document.getElementById('gatekeeper-modal').style.display = 'flex';
         }
 
-        async function resolveGatekeeper(allowed) {
-            document.getElementById('gatekeeper-modal').style.display = 'none';
-            if (!allowed || !pendingCommand) return;
-            const res = await fetch('/execute_os', {
-                method: 'POST',
-                headers: getAuthHeaders(),
-                body: JSON.stringify({ cmd: pendingCommand.cmd, target_id: pendingCommand.targetId })
-            });
-            const data = await res.json();
-            updateTarget(data.output, data.target_id || pendingCommand.targetId);
-        }
-
-        // Apply received form state from SSE (bi‑directional sync)
         function applyRemoteState(newState) {
             Object.entries(newState).forEach(([key, value]) => {
                 const el = document.getElementById(key);
                 if (!el) return;
                 if (el.type === 'checkbox') {
-                    if (el.checked !== value) {
-                        el.checked = value;
-                        evaluateReactiveMath();
-                    }
+                    if (el.checked !== value) el.checked = value;
                 } else {
-                    if (el.value !== value) {
-                        el.value = value;
-                        evaluateReactiveMath();
-                    }
+                    if (el.value !== value) el.value = value;
                 }
             });
+            evaluateReactiveMath();
         }
 
-        // SSE: real‑time updates + state sharing
         function startSSE() {
             const evtSource = new EventSource('/stream');
+            const statusDot = document.getElementById('sse-status');
+
+            evtSource.addEventListener('open', () => {
+                statusDot.style.background = '#00e676';
+            });
+
             evtSource.addEventListener('callback_output', e => {
                 const data = JSON.parse(e.data);
                 updateTarget(data.output, data.target_id);
             });
-            evtSource.addEventListener('command_output', e => {
+
+            // New streaming events
+            evtSource.addEventListener('os_output_chunk', e => {
                 const data = JSON.parse(e.data);
-                updateTarget(data.output, data.target_id);
+                if (data.stream_id && activeStreams[data.stream_id]) {
+                    appendStreamChunk(data.stream_id, data.text);
+                }
             });
+
+            evtSource.addEventListener('os_output_done', e => {
+                const data = JSON.parse(e.data);
+                if (data.stream_id && activeStreams[data.stream_id]) {
+                    finishStream(data.stream_id, data.final, data.return_code);
+                }
+            });
+
             evtSource.addEventListener('state_update', e => {
                 const state = JSON.parse(e.data);
                 applyRemoteState(state);
             });
+
+            evtSource.addEventListener('tokens_updated', e => {
+                // Re‑render the whole UI without page reload
+                console.log("Tokens updated, re‑rendering UI...");
+                initRuntime();
+            });
+
             evtSource.onerror = () => {
+                statusDot.style.background = '#ff5252';
                 evtSource.close();
                 setTimeout(startSSE, 3000);
             };

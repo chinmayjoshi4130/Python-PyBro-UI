@@ -18,6 +18,15 @@ import hashlib
 import shutil
 import hmac
 import traceback
+import html
+import time
+import uuid
+
+# --- tomllib / tomli fallback ---
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib
 
 COMPILED_TOKENS = []
 TARGET_MODULE = None
@@ -77,7 +86,6 @@ def get_bundle_info():
     manifest_path = os.path.join(PROJECT_DIR, 'pybro.toml')
     if os.path.exists(manifest_path):
         try:
-            import tomllib
             with open(manifest_path, 'rb') as f:
                 config = tomllib.load(f)
             distribute = config.get('distribute', {})
@@ -117,15 +125,12 @@ def build_token_tree():
         with open(full_path, 'r', encoding='utf-8') as f:
             files_dict[rel_path] = f.read()
 
-    # Build payload (without signature)
     payload = {
         "ui_tokens": COMPILED_TOKENS,
         "files": files_dict,
         "requires": bundle_info['requires']
     }
-    # Canonical JSON for signing
     payload_json = json.dumps(payload, sort_keys=True, separators=(',', ':')).encode('utf-8')
-    # HMAC-SHA256 with the session key
     sig = hmac.new(SESSION_KEY.encode('utf-8'), payload_json, hashlib.sha256).hexdigest()
     payload['signature'] = sig
     PROJECT_TOKEN_TREE = payload
@@ -199,7 +204,6 @@ class PybroUIParser(ast.NodeVisitor):
                 elif func_name == 'text_area' and len(args) >= 2:
                     token = {"type": "UI_TEXT_AREA", "id": args[0], "label": args[1]}
                 elif func_name == 'button_callback' and len(args) >= 2:
-                    # Prefer keyword target_id, then positional third argument
                     target = kwargs.get('target_id', None)
                     if target is None and len(args) >= 3:
                         target = args[2]
@@ -222,6 +226,62 @@ class PybroUIParser(ast.NodeVisitor):
                         token['class'] = kwargs['class']
                     COMPILED_TOKENS.append(token)
         self.generic_visit(node)
+
+
+# ---------- Streaming OS command execution ----------
+def stream_os_command(cmd, stream_id, target_id, timeout):
+    """Run cmd in a subprocess and broadcast lines via SSE."""
+    try:
+        process = subprocess.Popen(
+            cmd,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1
+        )
+
+        # Read line by line with timeout
+        def read_output():
+            try:
+                for line in iter(process.stdout.readline, ''):
+                    if line:
+                        broadcast_event("os_output_chunk", {
+                            "stream_id": stream_id,
+                            "text": html.escape(line.rstrip('\n'))
+                        })
+                process.stdout.close()
+                return_code = process.wait(timeout=timeout)
+                broadcast_event("os_output_done", {
+                    "stream_id": stream_id,
+                    "target_id": target_id,
+                    "return_code": return_code,
+                    "final": html.escape(f"\n[Process exited with code {return_code}]")
+                })
+            except subprocess.TimeoutExpired:
+                process.kill()
+                broadcast_event("os_output_done", {
+                    "stream_id": stream_id,
+                    "target_id": target_id,
+                    "return_code": -1,
+                    "final": html.escape(f"\n[!] Command timed out after {timeout} seconds")
+                })
+            except Exception as e:
+                broadcast_event("os_output_done", {
+                    "stream_id": stream_id,
+                    "target_id": target_id,
+                    "return_code": -1,
+                    "final": html.escape(f"\n[!] Unexpected error: {str(e)}")
+                })
+        threading.Thread(target=read_output, daemon=True).start()
+
+    except Exception as e:
+        broadcast_event("os_output_done", {
+            "stream_id": stream_id,
+            "target_id": target_id,
+            "return_code": -1,
+            "final": html.escape(f"\n[!] Failed to start process: {str(e)}")
+        })
 
 
 class EphemeralServer(http.server.SimpleHTTPRequestHandler):
@@ -266,12 +326,10 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
             client_queue = queue.Queue()
             with sse_lock:
                 sse_clients.append(client_queue)
-            # Send current state on connect
             with state_lock:
                 current_state = json.dumps(dict(shared_form_state))
             client_queue.put(("state_update", current_state))
 
-            # Heartbeat timer (keeps connection alive)
             def heartbeat():
                 while True:
                     try:
@@ -286,7 +344,6 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
                     event_type, data = client_queue.get()
                     if event_type == "close":
                         break
-                    # heartbeat is sent as a comment to keep connection alive
                     if event_type == "heartbeat":
                         self.wfile.write(b": heartbeat\n\n")
                     else:
@@ -358,23 +415,28 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
             target_id = post_data.get('target_id')
             is_valid = any(t.get('cmd') == requested_cmd for t in COMPILED_TOKENS if t['type'] == 'OS_GATEKEEPER')
 
-            if is_valid:
-                try:
-                    # shell=True is kept for pipes/redirects; exact match above prevents injection.
-                    result = subprocess.run(requested_cmd, shell=True, capture_output=True, text=True, timeout=5)
-                    response_text = result.stdout if result.stdout else result.stderr
-                except Exception as e:
-                    response_text = f"Error: {str(e)}"
-                    traceback.print_exc()
-            else:
-                response_text = "Security Violation: Dynamic evaluation pipeline rejected."
+            if not is_valid:
+                resp = {"stream_id": None, "error": "Security Violation: Dynamic evaluation pipeline rejected."}
+                self.send_response(403)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps(resp).encode())
+                return
 
-            resp = {"output": response_text.strip(), "target_id": target_id}
-            self.send_response(200)
+            stream_id = str(uuid.uuid4())
+            timeout = getattr(self.server, 'os_timeout', 5)
+            # Start streaming in background
+            threading.Thread(
+                target=stream_os_command,
+                args=(requested_cmd, stream_id, target_id, timeout),
+                daemon=True
+            ).start()
+
+            # Immediately return the stream_id
+            self.send_response(202)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
-            self.wfile.write(json.dumps(resp).encode())
-            broadcast_event("command_output", resp)
+            self.wfile.write(json.dumps({"stream_id": stream_id, "target_id": target_id}).encode())
 
         elif self.path == '/trigger_callback':
             func_name = post_data.get('callback_name')
@@ -400,6 +462,45 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
             broadcast_event("callback_output", resp)
 
 
+def watch_script(script_path):
+    """Poll the script file for changes and re‑compile tokens."""
+    last_mtime = os.path.getmtime(script_path)
+    while True:
+        time.sleep(2)
+        try:
+            current_mtime = os.path.getmtime(script_path)
+            if current_mtime != last_mtime:
+                print("[*] Script change detected. Re‑compiling...")
+                with open(script_path, "r") as f:
+                    ast_tree = ast.parse(f.read())
+                global COMPILED_TOKENS
+                COMPILED_TOKENS = []  # reset
+                parser_obj = PybroUIParser()
+                parser_obj.visit(ast_tree)
+                # Also re-import the module so callbacks are updated
+                global TARGET_MODULE
+                module_name = os.path.splitext(os.path.basename(script_path))[0]
+                spec = importlib.util.spec_from_file_location(module_name, script_path)
+                TARGET_MODULE = importlib.util.module_from_spec(spec)
+                try:
+                    spec.loader.exec_module(TARGET_MODULE)
+                except Exception as e:
+                    print(f"[!] Warning: could not reload module: {e}")
+                # If in shared+connectable mode, rebuild token tree
+                if PROJECT_DIR and SESSION_KEY and getattr(args, 'connectable', False):
+                    build_token_tree()
+                # Notify all SSE clients to refresh UI
+                broadcast_event("tokens_updated", {"message": "UI tokens reloaded"})
+                print("[+] Re‑compile successful. UI refreshed.")
+                last_mtime = current_mtime
+        except FileNotFoundError:
+            print("[!] Watched script disappeared.")
+            break
+        except Exception as e:
+            print(f"[!] Error during re‑compile: {e}")
+            traceback.print_exc()
+
+
 def main():
     global COMPILED_TOKENS, TARGET_MODULE, SESSION_KEY, TEMP_DIR, PROJECT_DIR, PROJECT_TOKEN_TREE
 
@@ -408,17 +509,24 @@ def main():
     parser.add_argument("--shared", action="store_true", help="Mode 1: Shared Team Mode (exposes to LAN with security key)")
     parser.add_argument("--key", help="Specify a custom security key string")
     parser.add_argument("--connect", help="Mode 2: Remote Client Mirror (pulls blueprints from remote target IP:port)")
-    parser.add_argument("--connectable", action="store_true", help="When in shared mode, allow Mode 2 clients to download the signed project tree")
-    parser.add_argument("--keep-script", action="store_true", help="In Mode 2, keep the downloaded temporary codebase after exit")
+    parser.add_argument("--connectable", action="store_true",
+                        help="When in shared mode, allow Mode 2 clients to download the signed project tree")
+    parser.add_argument("--keep-script", action="store_true",
+                        help="In Mode 2, keep the downloaded temporary codebase after exit")
     parser.add_argument("--port", type=int, default=8080, help="Server port (default 8080)")
     parser.add_argument("--verbose", action="store_true", help="Enable HTTP request logging")
-    parser.add_argument("--ssl", action="store_true", help="Serve over HTTPS (requires --cert-file/--key-file or auto‑generation)")
+    parser.add_argument("--ssl", action="store_true",
+                        help="Serve over HTTPS (requires --cert-file/--key-file or auto‑generation)")
     parser.add_argument("--cert-file", help="Path to TLS certificate file (PEM) for --ssl")
     parser.add_argument("--key-file", help="Path to TLS private key file (PEM) for --ssl")
-    parser.add_argument("--allow-deps", action="store_true", help="In Mode 2, install external dependencies listed in the project's pybro.toml into a temporary venv")
+    parser.add_argument("--allow-deps", action="store_true",
+                        help="In Mode 2, install external dependencies listed in the project's pybro.toml into a temporary venv")
+    parser.add_argument("--entrypoint", help="Name of the main Python file in Mode 2 (default: main.py or first .py found)")
+    parser.add_argument("--os-timeout", type=int, default=5, help="Timeout in seconds for OS commands (default 5)")
+    parser.add_argument("--watch", action="store_true", help="Watch the script file for changes and auto‑reload tokens (master mode only)")
     args = parser.parse_args()
 
-    port = args.port   # local variable, not global
+    port = args.port
 
     # --- MODE 2: Distributed Sandbox Client ---
     if args.connect:
@@ -432,10 +540,10 @@ def main():
             try:
                 extracted_key = remote_target.split("key=")[1].split("&")[0]
                 headers["X-Pybro-Key"] = extracted_key
+                args.key = extracted_key
             except Exception:
                 pass
 
-        # Fetch tokens
         try:
             req = urllib.request.Request(f"{remote_target.split('?')[0].rstrip('/')}/tokens", headers=headers)
             with urllib.request.urlopen(req, timeout=5) as response:
@@ -446,7 +554,6 @@ def main():
             traceback.print_exc()
             sys.exit(1)
 
-        # Fetch signed token tree
         try:
             req = urllib.request.Request(f"{remote_target.split('?')[0].rstrip('/')}/token-tree", headers=headers)
             with urllib.request.urlopen(req, timeout=10) as response:
@@ -455,16 +562,19 @@ def main():
                     sys.exit(1)
                 token_tree = json.loads(response.read().decode())
                 signature = token_tree.pop('signature', None)
-                if not signature:
-                    raise ValueError("Token tree missing signature")
-                # Verify signature
-                payload_json = json.dumps(token_tree, sort_keys=True, separators=(',', ':')).encode('utf-8')
-                expected_sig = hmac.new(args.key.encode('utf-8') if args.key else b'', payload_json, hashlib.sha256).hexdigest()
-                if not hmac.compare_digest(expected_sig, signature):
-                    raise ValueError("Invalid signature – possible tampering or wrong key")
-                print("[+] Token tree signature verified.")
+                if signature:
+                    if not args.key:
+                        print("[-] The master requires a shared key. Please provide the --key argument.")
+                        sys.exit(1)
+                    payload_json = json.dumps(token_tree, sort_keys=True, separators=(',', ':')).encode('utf-8')
+                    expected_sig = hmac.new(args.key.encode('utf-8'), payload_json, hashlib.sha256).hexdigest()
+                    if not hmac.compare_digest(expected_sig, signature):
+                        raise ValueError("Invalid signature – possible tampering or wrong key")
+                    print("[+] Token tree signature verified.")
+                else:
+                    print("[*] No signature present – proceeding without verification.")
                 ui_tokens = token_tree['ui_tokens']
-                COMPILED_TOKENS = ui_tokens   # Replace with the remote tokens
+                COMPILED_TOKENS = ui_tokens
                 files = token_tree['files']
                 requires = token_tree.get('requires', [])
         except urllib.error.HTTPError as e:
@@ -480,7 +590,6 @@ def main():
             traceback.print_exc()
             sys.exit(1)
 
-        # Create temp directory and extract all files
         TEMP_DIR = tempfile.mkdtemp(prefix='pybro_')
         for rel_path, content in files.items():
             dest_path = os.path.join(TEMP_DIR, rel_path)
@@ -489,11 +598,9 @@ def main():
                 f.write(content)
         print(f"[+] Codebase extracted to {TEMP_DIR}")
 
-        # Add temp directory to sys.path
         if TEMP_DIR not in sys.path:
             sys.path.insert(0, TEMP_DIR)
 
-        # Handle external dependencies
         if requires:
             if args.allow_deps:
                 print("[*] Installing external dependencies...")
@@ -523,7 +630,6 @@ def main():
                         print(f"[!] Failed to install {dep}: {e.stderr}")
                         print("[!] The script may fail due to missing dependencies.")
 
-                # Add venv site-packages to sys.path
                 try:
                     result = subprocess.run([py_path, '-c', "import site; print(';'.join(site.getsitepackages()))"],
                                             capture_output=True, text=True, env=env)
@@ -545,22 +651,27 @@ def main():
                 print("[!] Use --allow-deps to install them in a temporary venv.")
                 print("[!] The script may fail if these are not already installed globally.")
 
-        # Load the main module
-        main_candidates = [f for f in os.listdir(TEMP_DIR) if f.endswith('.py')]
-        main_script = next((f for f in main_candidates if f == 'main.py'), main_candidates[0] if main_candidates else None)
-        if main_script:
-            module_name = os.path.splitext(main_script)[0]
-            spec = importlib.util.spec_from_file_location(module_name, os.path.join(TEMP_DIR, main_script))
-            TARGET_MODULE = importlib.util.module_from_spec(spec)
-            try:
-                spec.loader.exec_module(TARGET_MODULE)
-                print(f"[+] Loaded module '{module_name}' from codebase.")
-            except Exception as e:
-                print(f"[!] Warning: could not execute module: {e}")
-                traceback.print_exc()
+        if args.entrypoint:
+            main_script = args.entrypoint
+            if not os.path.isfile(os.path.join(TEMP_DIR, main_script)):
+                print(f"[!] Specified entrypoint '{main_script}' not found in the bundle.")
+                sys.exit(1)
         else:
-            print("[!] No Python files found in the downloaded bundle.")
-            sys.exit(1)
+            main_candidates = [f for f in os.listdir(TEMP_DIR) if f.endswith('.py')]
+            main_script = next((f for f in main_candidates if f == 'main.py'), main_candidates[0] if main_candidates else None)
+            if not main_script:
+                print("[!] No Python files found in the downloaded bundle.")
+                sys.exit(1)
+
+        module_name = os.path.splitext(main_script)[0]
+        spec = importlib.util.spec_from_file_location(module_name, os.path.join(TEMP_DIR, main_script))
+        TARGET_MODULE = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(TARGET_MODULE)
+            print(f"[+] Loaded module '{module_name}' from codebase.")
+        except Exception as e:
+            print(f"[!] Warning: could not execute module: {e}")
+            traceback.print_exc()
 
         bind_ip = "127.0.0.1"
 
@@ -573,7 +684,6 @@ def main():
         script_path = os.path.abspath(args.script)
         PROJECT_DIR = os.path.dirname(script_path)
 
-        # Make sure the project directory is in sys.path so imports work
         if PROJECT_DIR not in sys.path:
             sys.path.insert(0, PROJECT_DIR)
 
@@ -597,13 +707,17 @@ def main():
         else:
             bind_ip = "127.0.0.1"
 
-        if args.connectable and SESSION_KEY:
-            build_token_tree()
-            print("[*] Project token tree signed and ready for distribution.")
-        elif args.connectable and not SESSION_KEY:
-            print("[!] --connectable requires a shared key. Use --shared --key <secret>.")
+        if args.connectable:
+            if not args.shared:
+                print("[!] --connectable requires --shared (shared mode). Exiting.")
+                sys.exit(1)
+            if SESSION_KEY:
+                build_token_tree()
+                print("[*] Project token tree signed and ready for distribution.")
+            else:
+                print("[!] --connectable requires a shared key. Use --shared --key <secret>.")
+                sys.exit(1)
 
-    # Temp codebase cleanup
     if TEMP_DIR and not args.keep_script:
         def cleanup_temp_dir():
             if os.path.exists(TEMP_DIR):
@@ -611,7 +725,6 @@ def main():
                 print(f"[-] Temporary codebase {TEMP_DIR} deleted.")
         atexit.register(cleanup_temp_dir)
 
-    # SSL context setup
     ssl_context = None
     cert_file = None
     key_file = None
@@ -659,7 +772,6 @@ def main():
                 print(f"[!] Failed to generate SSL certificate: {e}")
                 sys.exit(1)
 
-    # Threaded server
     class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         allow_reuse_address = True
         daemon_threads = True
@@ -667,6 +779,7 @@ def main():
     try:
         with ThreadedTCPServer((bind_ip, port), EphemeralServer) as httpd:
             httpd.verbose = args.verbose
+            httpd.os_timeout = args.os_timeout
 
             if ssl_context:
                 httpd.socket = ssl_context.wrap_socket(httpd.socket, server_side=True)
@@ -690,6 +803,11 @@ def main():
                 print(f"=======================================================\n")
                 if not args.connect:
                     webbrowser.open(f"{protocol}://localhost:{port}")
+
+            # Start file watcher if requested (master mode only)
+            if args.watch and not args.connect:
+                print("[*] Starting file watcher on", script_path)
+                threading.Thread(target=watch_script, args=(script_path,), daemon=True).start()
 
             httpd.serve_forever()
     except KeyboardInterrupt:
