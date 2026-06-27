@@ -1,0 +1,6 @@
+[distribute]
+# Only bundle the Python files we actually need
+include = ["main.py", "scanner.py", "utils.py"]
+# External dependencies required by this project
+requires = ["python-nmap"]
+

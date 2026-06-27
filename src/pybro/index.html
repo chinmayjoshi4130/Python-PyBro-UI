@@ -154,8 +154,8 @@
             <p><strong>Intent Vector:</strong> <span id="gate-desc"></span></p>
             <p><strong>Payload Target String:</strong> <code id="gate-cmd" style="background:#0a0f1c; padding:8px; display:block; margin-top:8px; color:var(--green)"></code></p>
             <div style="display: flex; justify-content: flex-end; gap: 1rem; margin-top: 1.5rem;">
-                <button id="gate-deny-btn">Deny</button>
-                <button id="gate-approve-btn" style="background: var(--red); color:#fff;">Approve</button>
+                <button id="gate-deny-btn" type="button">Deny</button>
+                <button id="gate-approve-btn" type="button" style="background: var(--red); color:#fff;">Approve</button>
             </div>
         </div>
     </div>
@@ -195,6 +195,16 @@
                     const val = parseFloat(state[key]) || 0;
                     expression = expression.replaceAll(`{${key}}`, val);
                 });
+                // Warn about missing placeholders (still in expression)
+                const unresolved = expression.match(/\{(\w+)\}/g);
+                if (unresolved) {
+                    unresolved.forEach(ph => {
+                        const id = ph.slice(1, -1);
+                        if (!(id in state)) {
+                            console.warn(`Math formula for "${formulaObj.target_id}" references unknown field: ${id}`);
+                        }
+                    });
+                }
                 try {
                     const result = Function("\"use strict\"; return (" + expression + ")")();
                     if(targetElement.tagName === 'INPUT' || targetElement.tagName === 'TEXTAREA') targetElement.value = result;
@@ -222,7 +232,13 @@
             }
         }
 
-        // Bi‑directional state sharing
+        // Bi‑directional state sharing – debounced to avoid flooding the server
+        let syncTimeout = null;
+        function debouncedSyncFormState() {
+            clearTimeout(syncTimeout);
+            syncTimeout = setTimeout(syncFormStateToServer, 300);
+        }
+
         function syncFormStateToServer() {
             const state = getFormState();
             fetch('/broadcast_state', {
@@ -279,28 +295,28 @@
                             currentContainer.appendChild(h);
                             return;
                         case "UI_INPUT":
-                            wrapper.innerHTML = `<label>${tok.label}</label><input id="${tok.id}" type="text" oninput="evaluateReactiveMath(); syncFormStateToServer()">`;
+                            wrapper.innerHTML = `<label>${tok.label}</label><input id="${tok.id}" type="text" oninput="evaluateReactiveMath(); debouncedSyncFormState()">`;
                             break;
                         case "UI_CHECKBOX":
-                            wrapper.innerHTML = `<label style="display:flex; align-items:center; gap:8px;"><input id="${tok.id}" type="checkbox" onchange="evaluateReactiveMath(); syncFormStateToServer()"> ${tok.label}</label>`;
+                            wrapper.innerHTML = `<label style="display:flex; align-items:center; gap:8px;"><input id="${tok.id}" type="checkbox" onchange="evaluateReactiveMath(); debouncedSyncFormState()"> ${tok.label}</label>`;
                             break;
                         case "UI_DROPDOWN":
                             const optionsHTML = tok.options.map(o => `<option value="${o}">${o}</option>`).join('');
-                            wrapper.innerHTML = `<label>${tok.label}</label><select id="${tok.id}" onchange="evaluateReactiveMath(); syncFormStateToServer()">${optionsHTML}</select>`;
+                            wrapper.innerHTML = `<label>${tok.label}</label><select id="${tok.id}" onchange="evaluateReactiveMath(); debouncedSyncFormState()">${optionsHTML}</select>`;
                             break;
                         case "UI_TEXT_AREA":
                             wrapper.innerHTML = `<label>${tok.label}</label><textarea id="${tok.id}" readonly>System Idle...</textarea>`;
                             break;
                         case "UI_CALLBACK_BUTTON":
                             callbackButtons[tok.callback_name] = tok.target_id || null;
-                            wrapper.innerHTML = `<button data-callback="${tok.callback_name}">${tok.text}</button>`;
+                            wrapper.innerHTML = `<button type="button" data-callback="${tok.callback_name}">${tok.text}</button>`;
                             break;
                         case "UI_MATH_COMPUTE":
                             globalMathFormulas.push(tok);
                             return;
                         case "OS_GATEKEEPER":
                             wrapper.innerHTML = `
-                                <button data-os-cmd="${encodeURIComponent(tok.cmd)}" data-os-desc="${encodeURIComponent(tok.desc)}" data-os-target="${tok.target_id}">Execute Script Hook</button>
+                                <button type="button" data-os-cmd="${encodeURIComponent(tok.cmd)}" data-os-desc="${encodeURIComponent(tok.desc)}" data-os-target="${tok.target_id}">Execute Script Hook</button>
                                 <label style="margin-top:10px;">System Buffer Output:</label>
                                 <div id="${tok.target_id}" class="terminal">Console idle.</div>`;
                             break;
