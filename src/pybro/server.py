@@ -228,7 +228,23 @@ class PybroUIParser(ast.NodeVisitor):
                             kwargs['target_id'] = None
 
                 token = None
-                if func_name == 'title' and args:
+
+                # --- new structural tokens ---
+                if func_name == 'page_start' and args:
+                    token = {"type": "PAGE_START", "name": args[0]}
+                elif func_name == 'page_end':
+                    token = {"type": "PAGE_END"}
+                elif func_name == 'tab_group_start':
+                    token = {"type": "TAB_GROUP_START"}
+                elif func_name == 'tab_start' and args:
+                    token = {"type": "TAB_START", "name": args[0]}
+                elif func_name == 'tab_end':
+                    token = {"type": "TAB_END"}
+                elif func_name == 'tab_group_end':
+                    token = {"type": "TAB_GROUP_END"}
+
+                # --- original tokens unchanged ---
+                elif func_name == 'title' and args:
                     token = {"type": "UI_TITLE", "text": args[0]}
                 elif func_name == 'row_start':
                     token = {"type": "LAYOUT_ROW_START"}
@@ -265,60 +281,6 @@ class PybroUIParser(ast.NodeVisitor):
                         token['class'] = kwargs['class']
                     COMPILED_TOKENS.append(token)
         self.generic_visit(node)
-
-
-# ---------- Streaming OS command execution ----------
-def stream_os_command(cmd, stream_id, target_id, timeout):
-    """Run cmd in a subprocess and broadcast lines via SSE."""
-    try:
-        process = subprocess.Popen(
-            cmd,
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1
-        )
-
-        def read_output():
-            try:
-                for line in iter(process.stdout.readline, ''):
-                    if line:
-                        broadcast_event("os_output_chunk", {
-                            "stream_id": stream_id,
-                            "text": html.escape(line.rstrip('\n'))
-                        })
-                process.stdout.close()
-                return_code = process.wait(timeout=timeout)
-                broadcast_event("os_output_done", {
-                    "stream_id": stream_id,
-                    "target_id": target_id,
-                    "return_code": return_code,
-                    "final": html.escape(f"\n[Process exited with code {return_code}]")
-                })
-            except subprocess.TimeoutExpired:
-                process.kill()
-                broadcast_event("os_output_done", {
-                    "stream_id": stream_id,
-                    "target_id": target_id,
-                    "return_code": -1,
-                    "final": html.escape(f"\n[!] Command timed out after {timeout} seconds")
-                })
-            except Exception as e:
-                broadcast_event("os_output_done", {
-                    "stream_id": stream_id,
-                    "target_id": target_id,
-                    "return_code": -1,
-                    "final": html.escape(f"\n[!] Unexpected error: {str(e)}")
-                })
-        threading.Thread(target=read_output, daemon=True).start()
-    except Exception as e:
-        broadcast_event("os_output_done", {
-            "stream_id": stream_id,
-            "target_id": target_id,
-            "return_code": -1,
-            "final": html.escape(f"\n[!] Failed to start process: {str(e)}")
-        })
 
 
 class EphemeralServer(http.server.SimpleHTTPRequestHandler):
@@ -456,25 +418,30 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
             is_valid = any(t.get('cmd') == requested_cmd for t in COMPILED_TOKENS if t['type'] == 'OS_GATEKEEPER')
 
             if not is_valid:
-                resp = {"stream_id": None, "error": "Security Violation: Dynamic evaluation pipeline rejected."}
+                resp = {"output": "Security Violation: Dynamic evaluation pipeline rejected.", "target_id": target_id}
                 self.send_response(403)
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
                 self.wfile.write(json.dumps(resp).encode())
                 return
 
-            stream_id = str(uuid.uuid4())
             timeout = getattr(self.server, 'os_timeout', 5)
-            threading.Thread(
-                target=stream_os_command,
-                args=(requested_cmd, stream_id, target_id, timeout),
-                daemon=True
-            ).start()
+            try:
+                result = subprocess.run(requested_cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+                raw_output = result.stdout if result.stdout else result.stderr
+                response_text = html.escape(raw_output).strip()
+                if not response_text:
+                    response_text = "(no output)"
+            except subprocess.TimeoutExpired:
+                response_text = html.escape(f"[!] Command timed out after {timeout} seconds.")
+            except Exception as e:
+                response_text = html.escape(f"Error: {str(e)}")
 
-            self.send_response(202)
+            resp = {"output": response_text, "target_id": target_id}
+            self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
-            self.wfile.write(json.dumps({"stream_id": stream_id, "target_id": target_id}).encode())
+            self.wfile.write(json.dumps(resp).encode())
 
         elif self.path == '/trigger_callback':
             func_name = post_data.get('callback_name')

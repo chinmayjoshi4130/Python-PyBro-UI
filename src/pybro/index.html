@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Pybro Dashboard</title>
     <style>
+        /* --- all styles unchanged (as in previous full version) --- */
         :root {
             --bg: #0b0f19;
             --surface: #131a2b;
@@ -154,10 +155,63 @@
             transition: background 0.2s;
             z-index: 100;
         }
+        #page-nav {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1.5rem;
+            border-bottom: 2px solid var(--border);
+            padding-bottom: 0.5rem;
+        }
+        .page-nav-btn {
+            background: none;
+            border: none;
+            color: var(--text);
+            padding: 0.5rem 1rem;
+            cursor: pointer;
+            font-weight: 600;
+            opacity: 0.7;
+            border-radius: var(--radius) var(--radius) 0 0;
+            transition: opacity 0.2s, background 0.2s;
+        }
+        .page-nav-btn.active {
+            opacity: 1;
+            background: var(--surface);
+            color: var(--accent);
+            border-bottom: 2px solid var(--accent);
+            margin-bottom: -2px;
+        }
+        .tab-bar {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 0.3rem;
+        }
+        .tab-btn {
+            background: none;
+            border: none;
+            color: var(--text);
+            padding: 0.4rem 0.8rem;
+            cursor: pointer;
+            opacity: 0.7;
+            border-radius: var(--radius) var(--radius) 0 0;
+        }
+        .tab-btn.active {
+            opacity: 1;
+            background: var(--surface);
+            color: var(--accent);
+            border-bottom: 2px solid var(--accent);
+            margin-bottom: -1px;
+        }
+        .page-content { display: none; }
+        .page-content.active { display: block; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
     </style>
 </head>
 <body>
     <div id="sse-status" title="SSE connection status"></div>
+    <div id="page-nav"></div>
     <div id="app-canvas"></div>
 
     <div id="gatekeeper-modal" class="modal">
@@ -176,26 +230,19 @@
         let pendingCommand = null;
         let globalMathFormulas = [];
         let callbackButtons = {};
-        let activeStreams = {};
-        let currentTokens = [];          // store the last known token snapshot
-
-        // ---------- form state preservation ----------
+        let currentTokens = [];
         let savedFormState = {};
+        let activePageName = null;
+        let activeTabName = {};
 
         const urlParams = new URLSearchParams(window.location.search);
         if (urlParams.has('key')) {
-            try {
-                sessionStorage.setItem('pybro_session_token', urlParams.get('key'));
-            } catch (e) {
-                console.warn("sessionStorage not available – key will only be used for this session.");
-            }
+            try { sessionStorage.setItem('pybro_session_token', urlParams.get('key')); } catch (e) {}
         }
 
         function getAuthHeaders() {
             let token = null;
-            try {
-                token = sessionStorage.getItem('pybro_session_token');
-            } catch (e) {}
+            try { token = sessionStorage.getItem('pybro_session_token'); } catch (e) {}
             return token ? { 'X-Pybro-Key': token, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
         }
 
@@ -207,21 +254,13 @@
             return state;
         }
 
-        // Save current form values before we destroy the DOM
-        function captureFormState() {
-            savedFormState = getFormState();
-        }
-
-        // Apply saved values to the newly created inputs
+        function captureFormState() { savedFormState = getFormState(); }
         function restoreFormState() {
             Object.entries(savedFormState).forEach(([key, value]) => {
                 const el = document.getElementById(key);
                 if (!el) return;
-                if (el.type === 'checkbox') {
-                    el.checked = value;
-                } else {
-                    el.value = value;
-                }
+                if (el.type === 'checkbox') el.checked = value;
+                else el.value = value;
             });
         }
 
@@ -245,20 +284,12 @@
 
         function applyRootCSS(cssVars) {
             const root = document.documentElement;
-            for (const [prop, value] of Object.entries(cssVars)) {
-                root.style.setProperty(prop, value);
-            }
+            for (const [prop, value] of Object.entries(cssVars)) root.style.setProperty(prop, value);
         }
 
         function applyComponentCSS(wrapper, token) {
-            if (token.css) {
-                for (const [prop, value] of Object.entries(token.css)) {
-                    wrapper.style.setProperty(prop, value);
-                }
-            }
-            if (token.class) {
-                wrapper.classList.add(token.class);
-            }
+            if (token.css) for (const [p,v] of Object.entries(token.css)) wrapper.style.setProperty(p,v);
+            if (token.class) wrapper.classList.add(token.class);
         }
 
         let syncTimeout = null;
@@ -266,132 +297,266 @@
             clearTimeout(syncTimeout);
             syncTimeout = setTimeout(syncFormStateToServer, 300);
         }
-
         function syncFormStateToServer() {
             const state = getFormState();
-            fetch('/broadcast_state', {
-                method: 'POST',
-                headers: getAuthHeaders(),
-                body: JSON.stringify({ form_state: state })
-            }).catch(() => {});
+            fetch('/broadcast_state', { method: 'POST', headers: getAuthHeaders(), body: JSON.stringify({ form_state: state }) }).catch(() => {});
         }
 
+        // ---------- Page & Tab Structure ----------
+        function buildPageStructure(tokens) {
+            const pages = [];
+            let currentPage = null;
+            let inTabGroup = false;
+            let currentTab = null;
+            let tabTokens = [];
+
+            const flushTab = () => {
+                if (currentTab) {
+                    currentTab.tokens = tabTokens;
+                    if (!currentPage.tabs) currentPage.tabs = [];
+                    currentPage.tabs.push(currentTab);
+                    currentTab = null;
+                    tabTokens = [];
+                }
+            };
+
+            tokens.forEach(tok => {
+                if (tok.type === 'PAGE_START') {
+                    if (currentPage) pages.push(currentPage);
+                    currentPage = { name: tok.name, tokens: [], tabs: null };
+                    inTabGroup = false;
+                    flushTab();
+                } else if (tok.type === 'PAGE_END') {
+                    if (currentPage) { flushTab(); pages.push(currentPage); currentPage = null; }
+                } else if (tok.type === 'TAB_GROUP_START') {
+                    if (currentPage) { inTabGroup = true; if (!currentPage.tabs) currentPage.tabs = []; }
+                } else if (tok.type === 'TAB_GROUP_END') {
+                    flushTab(); inTabGroup = false;
+                } else if (tok.type === 'TAB_START') {
+                    flushTab(); currentTab = { name: tok.name, tokens: [] };
+                } else if (tok.type === 'TAB_END') {
+                    flushTab();
+                } else {
+                    if (currentPage) {
+                        if (inTabGroup && currentTab) {
+                            tabTokens.push(tok);
+                        } else if (!inTabGroup) {
+                            currentPage.tokens.push(tok);
+                        }
+                    }
+                }
+            });
+            if (currentPage) pages.push(currentPage);
+            return pages;
+        }
+
+        function renderPages(pages) {
+            const canvas = document.getElementById('app-canvas');
+            const nav = document.getElementById('page-nav');
+            canvas.innerHTML = '';
+            nav.innerHTML = '';
+
+            if (pages.length === 0) return;
+
+            pages.forEach(page => {
+                const btn = document.createElement('button');
+                btn.className = 'page-nav-btn';
+                btn.innerText = page.name;
+                btn.onclick = () => showPage(page.name);
+                nav.appendChild(btn);
+
+                const pageDiv = document.createElement('div');
+                pageDiv.className = 'page-content';
+                pageDiv.id = 'page-' + page.name.replace(/\s/g, '_');
+
+                // Page-level tokens first
+                if (page.tokens.length > 0) {
+                    const pageTokensDiv = document.createElement('div');
+                    renderTokens(pageTokensDiv, page.tokens);
+                    pageDiv.appendChild(pageTokensDiv);
+                }
+
+                // Tabs below
+                if (page.tabs && page.tabs.length > 0) {
+                    const tabBar = document.createElement('div');
+                    tabBar.className = 'tab-bar';
+                    const tabsContainer = document.createElement('div');
+                    tabsContainer.className = 'tabs-container';
+
+                    page.tabs.forEach(tab => {
+                        const tabBtn = document.createElement('button');
+                        tabBtn.className = 'tab-btn';
+                        tabBtn.innerText = tab.name;
+                        tabBtn.onclick = () => showTab(page.name, tab.name);
+                        tabBar.appendChild(tabBtn);
+
+                        const tabContent = document.createElement('div');
+                        tabContent.className = 'tab-content';
+                        tabContent.id = `tab-${page.name.replace(/\s/g, '_')}-${tab.name.replace(/\s/g, '_')}`;
+                        renderTokens(tabContent, tab.tokens);
+                        tabsContainer.appendChild(tabContent);
+                    });
+
+                    pageDiv.appendChild(tabBar);
+                    pageDiv.appendChild(tabsContainer);
+                }
+
+                canvas.appendChild(pageDiv);
+            });
+
+            const hash = window.location.hash.substring(1);
+            let initialPage = hash || pages[0].name;
+            if (!pages.find(p => p.name === initialPage)) initialPage = pages[0].name;
+            showPage(initialPage);
+        }
+
+        function showPage(pageName) {
+            document.querySelectorAll('.page-content').forEach(div => div.classList.remove('active'));
+            document.querySelectorAll('.page-nav-btn').forEach(btn => btn.classList.remove('active'));
+
+            const pageDiv = document.getElementById('page-' + pageName.replace(/\s/g, '_'));
+            if (pageDiv) pageDiv.classList.add('active');
+            document.querySelectorAll('.page-nav-btn').forEach(btn => {
+                if (btn.innerText === pageName) btn.classList.add('active');
+            });
+
+            activePageName = pageName;
+            window.location.hash = '#' + pageName;
+
+            const tabBtns = pageDiv ? pageDiv.querySelectorAll('.tab-btn') : [];
+            if (tabBtns.length > 0) {
+                const firstTabName = tabBtns[0].innerText;
+                if (!activeTabName[pageName]) showTab(pageName, firstTabName);
+                else showTab(pageName, activeTabName[pageName]);
+            }
+        }
+
+        function showTab(pageName, tabName) {
+            const pageDiv = document.getElementById('page-' + pageName.replace(/\s/g, '_'));
+            if (!pageDiv) return;
+            pageDiv.querySelectorAll('.tab-content').forEach(tc => tc.classList.remove('active'));
+            pageDiv.querySelectorAll('.tab-btn').forEach(tb => tb.classList.remove('active'));
+
+            const tabContent = document.getElementById(`tab-${pageName.replace(/\s/g, '_')}-${tabName.replace(/\s/g, '_')}`);
+            if (tabContent) tabContent.classList.add('active');
+            pageDiv.querySelectorAll('.tab-btn').forEach(btn => {
+                if (btn.innerText === tabName) btn.classList.add('active');
+            });
+
+            activeTabName[pageName] = tabName;
+        }
+
+        function renderTokens(container, tokens) {
+            globalMathFormulas = [];
+            callbackButtons = {};
+            let currentContainer = container;
+
+            tokens.forEach(tok => {
+                if (tok.type === 'LAYOUT_ROW_START') {
+                    const row = document.createElement('div'); row.className = "ui-row";
+                    applyComponentCSS(row, tok);
+                    container.appendChild(row);
+                    currentContainer = row;
+                    return;
+                }
+                if (tok.type === 'LAYOUT_ROW_END') {
+                    currentContainer = container;
+                    return;
+                }
+                if (tok.type === 'UI_ROOT_CSS') return;
+
+                const wrapper = document.createElement('div');
+                wrapper.className = "component";
+                applyComponentCSS(wrapper, tok);
+
+                switch(tok.type) {
+                    case "UI_TITLE":
+                        const h = document.createElement('h1');
+                        h.innerText = tok.text;
+                        if (tok.css) { for (const [p,v] of Object.entries(tok.css)) h.style.setProperty(p,v); }
+                        if (tok.class) h.classList.add(tok.class);
+                        currentContainer.appendChild(h);
+                        return;
+                    case "UI_INPUT":
+                        wrapper.innerHTML += `<label>${tok.label}</label><input id="${tok.id}" type="text" oninput="evaluateReactiveMath(); debouncedSyncFormState()">`;
+                        break;
+                    case "UI_CHECKBOX":
+                        wrapper.innerHTML += `<label style="display:flex; align-items:center; gap:8px;"><input id="${tok.id}" type="checkbox" onchange="evaluateReactiveMath(); debouncedSyncFormState()"> ${tok.label}</label>`;
+                        break;
+                    case "UI_DROPDOWN":
+                        const optionsHTML = tok.options.map(o => `<option value="${o}">${o}</option>`).join('');
+                        wrapper.innerHTML += `<label>${tok.label}</label><select id="${tok.id}" onchange="evaluateReactiveMath(); debouncedSyncFormState()">${optionsHTML}</select>`;
+                        break;
+                    case "UI_TEXT_AREA":
+                        wrapper.innerHTML += `<label>${tok.label}</label><textarea id="${tok.id}" readonly>System Idle...</textarea>`;
+                        break;
+                    case "UI_CALLBACK_BUTTON":
+                        callbackButtons[tok.callback_name] = tok.target_id || null;
+                        wrapper.innerHTML += `<button type="button" data-callback="${tok.callback_name}">${tok.text}</button>`;
+                        break;
+                    case "UI_MATH_COMPUTE":
+                        globalMathFormulas.push(tok);
+                        return;
+                    case "OS_GATEKEEPER":
+                        wrapper.innerHTML += `
+                            <button type="button" data-os-cmd="${encodeURIComponent(tok.cmd)}" data-os-desc="${encodeURIComponent(tok.desc)}" data-os-target="${tok.target_id}">Execute Script Hook</button>
+                            <label style="margin-top:10px;">System Buffer Output:</label>
+                            <div id="${tok.target_id}" class="terminal">Console idle.</div>`;
+                        break;
+                    case "UI_TABLE":
+                        let tableHtml = '';
+                        const headers = tok.headers || [];
+                        const rows = tok.rows || [];
+                        if (headers.length === 0 && rows.length === 0) {
+                            tableHtml = '<p style="padding:1rem;">No data available.</p>';
+                        } else {
+                            const ths = headers.map(h => `<th>${h}</th>`).join('');
+                            const trs = rows.map(r => {
+                                const cells = [];
+                                for (let i = 0; i < headers.length; i++) {
+                                    cells.push(`<td>${r[i] !== undefined ? r[i] : ''}</td>`);
+                                }
+                                return `<tr>${cells.join('')}</tr>`;
+                            }).join('');
+                            tableHtml = `<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
+                        }
+                        wrapper.innerHTML += tableHtml;
+                        break;
+                }
+                currentContainer.appendChild(wrapper);
+            });
+        }
+
+        // ---------- Runtime ----------
         async function initRuntime() {
-            // 1. Save scroll position
             const scrollY = window.scrollY;
-            // 2. Capture form values before destroying DOM
             captureFormState();
 
-            const canvas = document.getElementById('app-canvas');
-            canvas.innerHTML = '';
             const targetUrl = '/tokens' + window.location.search;
             try {
                 const res = await fetch(targetUrl, { headers: getAuthHeaders() });
                 if (res.status === 401) {
-                    canvas.innerHTML = `<h2 style="color:var(--red)">⚠️ Access Denied: Invalid Security Token</h2>`;
+                    document.getElementById('app-canvas').innerHTML = `<h2 style="color:var(--red)">⚠️ Access Denied: Invalid Security Token</h2>`;
                     return;
                 }
                 if (!res.ok) {
-                    canvas.innerHTML = `<h2 style="color:var(--red)">Could not load interface. Server returned ${res.status}.</h2>`;
+                    document.getElementById('app-canvas').innerHTML = `<h2 style="color:var(--red)">Could not load interface. Server returned ${res.status}.</h2>`;
                     return;
                 }
                 const tokens = await res.json();
                 currentTokens = tokens;
-
                 globalMathFormulas = [];
                 callbackButtons = {};
 
-                const rootToken = tokens.find(t => t.type === "UI_ROOT_CSS");
-                if (rootToken) {
-                    applyRootCSS(rootToken.css_vars);
-                }
+                const pages = buildPageStructure(tokens);
+                renderPages(pages);
 
-                let currentContainer = canvas;
-
-                tokens.forEach(tok => {
-                    if (tok.type === "LAYOUT_ROW_START") {
-                        const row = document.createElement('div'); row.className = "ui-row";
-                        applyComponentCSS(row, tok);
-                        canvas.appendChild(row);
-                        currentContainer = row;
-                        return;
-                    }
-                    if (tok.type === "LAYOUT_ROW_END") {
-                        currentContainer = canvas;
-                        return;
-                    }
-                    if (tok.type === "UI_ROOT_CSS") return;
-
-                    const wrapper = document.createElement('div');
-                    wrapper.className = "component";
-                    applyComponentCSS(wrapper, tok);
-
-                    switch(tok.type) {
-                        case "UI_TITLE":
-                            const h = document.createElement('h1');
-                            h.innerText = tok.text;
-                            if (tok.css) { for (const [p,v] of Object.entries(tok.css)) h.style.setProperty(p,v); }
-                            if (tok.class) h.classList.add(tok.class);
-                            currentContainer.appendChild(h);
-                            return;
-                        case "UI_INPUT":
-                            wrapper.innerHTML += `<label>${tok.label}</label><input id="${tok.id}" type="text" oninput="evaluateReactiveMath(); debouncedSyncFormState()">`;
-                            break;
-                        case "UI_CHECKBOX":
-                            wrapper.innerHTML += `<label style="display:flex; align-items:center; gap:8px;"><input id="${tok.id}" type="checkbox" onchange="evaluateReactiveMath(); debouncedSyncFormState()"> ${tok.label}</label>`;
-                            break;
-                        case "UI_DROPDOWN":
-                            const optionsHTML = tok.options.map(o => `<option value="${o}">${o}</option>`).join('');
-                            wrapper.innerHTML += `<label>${tok.label}</label><select id="${tok.id}" onchange="evaluateReactiveMath(); debouncedSyncFormState()">${optionsHTML}</select>`;
-                            break;
-                        case "UI_TEXT_AREA":
-                            wrapper.innerHTML += `<label>${tok.label}</label><textarea id="${tok.id}" readonly>System Idle...</textarea>`;
-                            break;
-                        case "UI_CALLBACK_BUTTON":
-                            callbackButtons[tok.callback_name] = tok.target_id || null;
-                            wrapper.innerHTML += `<button type="button" data-callback="${tok.callback_name}">${tok.text}</button>`;
-                            break;
-                        case "UI_MATH_COMPUTE":
-                            globalMathFormulas.push(tok);
-                            return;
-                        case "OS_GATEKEEPER":
-                            wrapper.innerHTML += `
-                                <button type="button" data-os-cmd="${encodeURIComponent(tok.cmd)}" data-os-desc="${encodeURIComponent(tok.desc)}" data-os-target="${tok.target_id}">Execute Script Hook</button>
-                                <label style="margin-top:10px;">System Buffer Output:</label>
-                                <div id="${tok.target_id}" class="terminal">Console idle.</div>`;
-                            break;
-                        case "UI_TABLE":
-                            let tableHtml = '';
-                            const headers = tok.headers || [];
-                            const rows = tok.rows || [];
-                            if (headers.length === 0 && rows.length === 0) {
-                                tableHtml = '<p style="padding:1rem;">No data available.</p>';
-                            } else {
-                                const ths = headers.map(h => `<th>${h}</th>`).join('');
-                                const trs = rows.map(r => {
-                                    const cells = [];
-                                    for (let i = 0; i < headers.length; i++) {
-                                        cells.push(`<td>${r[i] !== undefined ? r[i] : ''}</td>`);
-                                    }
-                                    return `<tr>${cells.join('')}</tr>`;
-                                }).join('');
-                                tableHtml = `<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
-                            }
-                            wrapper.innerHTML += tableHtml;
-                            break;
-                    }
-                    currentContainer.appendChild(wrapper);
-                });
-
-                // 3. Restore form values
-                restoreFormState();
-                // 4. Re-attach listeners and re-evaluate math
                 attachGlobalListeners();
                 evaluateReactiveMath();
-                // 5. Restore scroll position
+                restoreFormState();
                 window.scrollTo(0, scrollY);
             } catch(e) {
-                canvas.innerHTML = `<h2 style="color:var(--red)">Mount Exception: ${e.message || e}</h2>`;
+                document.getElementById('app-canvas').innerHTML = `<h2 style="color:var(--red)">Mount Exception: ${e.message || e}</h2>`;
             }
         }
 
@@ -404,13 +569,11 @@
                     openGatekeeper(cmd, desc, target);
                 });
             });
-
             document.querySelectorAll('button[data-callback]').forEach(btn => {
                 btn.addEventListener('click', function() {
                     firePythonCallback(this.dataset.callback);
                 });
             });
-
             document.getElementById('gate-approve-btn').addEventListener('click', () => resolveGatekeeper(true));
             document.getElementById('gate-deny-btn').addEventListener('click', () => resolveGatekeeper(false));
         }
@@ -431,26 +594,7 @@
             }
         }
 
-        function appendStreamChunk(stream_id, text) {
-            const stream = activeStreams[stream_id];
-            if (!stream) return;
-            const target = document.getElementById(stream.target_id);
-            if (!target) return;
-            if (target.tagName === 'TEXTAREA') {
-                target.value += text + "\n";
-            } else {
-                target.innerText += text + "\n";
-            }
-            target.scrollTop = target.scrollHeight;
-        }
-
-        function finishStream(stream_id, finalText, return_code) {
-            const stream = activeStreams[stream_id];
-            if (!stream) return;
-            appendStreamChunk(stream_id, finalText);
-            delete activeStreams[stream_id];
-        }
-
+        // --- Blocking OS execution (no streaming) ---
         async function resolveGatekeeper(allowed) {
             document.getElementById('gatekeeper-modal').style.display = 'none';
             if (!allowed || !pendingCommand) return;
@@ -461,18 +605,11 @@
                 body: JSON.stringify({ cmd: pendingCommand.cmd, target_id: pendingCommand.targetId })
             });
 
+            const data = await res.json();
             if (res.status === 403) {
                 updateTarget("Access denied by server.", pendingCommand.targetId);
-                return;
-            }
-
-            const data = await res.json();
-            if (data.stream_id) {
-                const stream_id = data.stream_id;
-                activeStreams[stream_id] = { target_id: data.target_id || pendingCommand.targetId };
-                updateTarget("Waiting for output...", data.target_id);
             } else {
-                updateTarget(data.error || "Unknown error.", pendingCommand.targetId);
+                updateTarget(data.output, data.target_id || pendingCommand.targetId);
             }
             pendingCommand = null;
         }
@@ -500,52 +637,25 @@
             Object.entries(newState).forEach(([key, value]) => {
                 const el = document.getElementById(key);
                 if (!el) return;
-                if (el.type === 'checkbox') {
-                    if (el.checked !== value) el.checked = value;
-                } else {
-                    if (el.value !== value) el.value = value;
-                }
+                if (el.type === 'checkbox') { if (el.checked !== value) el.checked = value; } else { if (el.value !== value) el.value = value; }
             });
             evaluateReactiveMath();
         }
-
-        // ================ SSE + Polling ================
 
         function startSSE() {
             const evtSource = new EventSource('/stream');
             const statusDot = document.getElementById('sse-status');
 
-            evtSource.addEventListener('open', () => {
-                statusDot.style.background = '#00e676';
-            });
-
+            evtSource.addEventListener('open', () => { statusDot.style.background = '#00e676'; });
             evtSource.addEventListener('callback_output', e => {
                 const data = JSON.parse(e.data);
                 updateTarget(data.output, data.target_id);
             });
-
-            evtSource.addEventListener('os_output_chunk', e => {
-                const data = JSON.parse(e.data);
-                if (data.stream_id && activeStreams[data.stream_id]) {
-                    appendStreamChunk(data.stream_id, data.text);
-                }
-            });
-
-            evtSource.addEventListener('os_output_done', e => {
-                const data = JSON.parse(e.data);
-                if (data.stream_id && activeStreams[data.stream_id]) {
-                    finishStream(data.stream_id, data.final, data.return_code);
-                }
-            });
-
             evtSource.addEventListener('state_update', e => {
                 const state = JSON.parse(e.data);
                 applyRemoteState(state);
             });
-
-            evtSource.addEventListener('tokens_updated', () => {
-                initRuntime();
-            });
+            evtSource.addEventListener('tokens_updated', () => { initRuntime(); });
 
             evtSource.onerror = () => {
                 statusDot.style.background = '#ff5252';
