@@ -1,24 +1,24 @@
-Pybro Technical & User Manual
+# Pybro Technical & User Manual
 
 This document is the complete guide to pybro, a zero‑dependency Python UI runtime for automation scripts. It covers everything from installation and quick start to the internal architecture, API references, and security model. Use it as your single source of truth for both using and extending pybro.
 
 ---
 
-1. What is Pybro?
+## 1. What is Pybro?
 
-Pybro parses declarative UI code from a Python automation script using the standard AST module, compiles it into a list of JSON tokens, and serves them through a lightweight HTTP server. A static frontend (index.html) renders the tokens as a responsive web dashboard with real‑time updates.
+Pybro parses declarative UI code from a Python automation script using the standard AST module, compiles it into a list of JSON tokens, and serves them through a lightweight HTTP server. A static frontend (`index.html`) renders the tokens as a responsive web dashboard with real‑time updates for form state and UI changes.
 
 Key characteristics:
 
-· Zero external dependencies – the engine uses only Python standard library modules.
-· In‑memory only – no database, no file storage; state vanishes when the process stops.
-· Reactive – client‑side math, bi‑directional form sync, streaming output via Server‑Sent Events.
-· Modular – scripts can import helper modules from their own directory.
-· Portable – runs anywhere Python does, including Termux on Android.
+- **Zero external dependencies** – the engine uses only Python standard library modules.
+- **In‑memory only** – no database, no file storage; state vanishes when the process stops.
+- **Reactive** – client‑side math, bi‑directional form sync, and automatic UI refresh via Server‑Sent Events.
+- **Modular** – scripts can import helper modules from their own directory.
+- **Portable** – runs anywhere Python does, including Termux on Android.
 
 ---
 
-2. Installation
+## 2. Installation
 
 Clone the repository and install in development mode:
 
@@ -77,6 +77,18 @@ pybro examples/mytool.py
 
 Every visual token accepts optional keyword arguments css (dictionary of inline styles) and class_ (CSS class string). Some tokens also recognise target_id.
 
+Structural Tokens (Pages & Tabs)
+
+Python call Token type Description
+ui.page_start("Name") PAGE_START Begins a new page. All following tokens belong to this page until PAGE_END.
+ui.page_end() PAGE_END Ends the current page.
+ui.tab_group_start() TAB_GROUP_START Opens a tab group inside the current page.
+ui.tab_start("Tab Name") TAB_START Starts a named tab within the tab group.
+ui.tab_end() TAB_END Ends the current tab.
+ui.tab_group_end() TAB_GROUP_END Ends the tab group.
+
+Visual Tokens
+
 Call Token Type Description Key Fields
 ui.title(text) UI_TITLE Header block. text
 ui.row_start() LAYOUT_ROW_START Begins a horizontal flex row. –
@@ -87,7 +99,7 @@ ui.dropdown(id, label, options) UI_DROPDOWN Drop‑down selection. id, label, op
 ui.text_area(id, label) UI_TEXT_AREA Read‑only output textarea. id, label
 ui.math_compute(target_id, formula) UI_MATH_COMPUTE Client‑side expression with {placeholder} substitution. target_id, formula
 ui.button_callback(text, function, target_id?) UI_CALLBACK_BUTTON Triggers a Python function. target_id can be positional or keyword. text, callback_name, target_id
-ui.os_command(cmd, desc, target_id) OS_GATEKEEPER Shell command with gatekeeper confirmation. cmd, desc, target_id
+ui.os_command(cmd, desc, target_id) OS_GATEKEEPER Shell command with gatekeeper confirmation. Output is shown after the command completes (blocking execution). cmd, desc, target_id
 ui.table(headers, rows) UI_TABLE Static table. headers, rows
 ui.root_css(vars_dict) UI_ROOT_CSS Overrides global CSS custom properties. css_vars
 
@@ -146,6 +158,8 @@ set_class Replaces CSS class value (str)
 insert_table_row Appends a row to a UI_TABLE row (list)
 set_table_rows Replaces all rows rows (list of lists)
 set_options Replaces dropdown options options (list)
+
+Note: token_index refers to the zero‑based position of the token in COMPILED_TOKENS. The first ui.* call is index 0, and structural tokens (PAGE_START, ROW_START, etc.) are included in the indexing. Inspect /tokens in the browser to see the exact order.
 
 Example callback that adds a row to a table and updates a title:
 
@@ -221,14 +235,14 @@ User Script (.py)
      │
      ├─► EphemeralServer (HTTP)
      │      ├─ GET  /tokens          → JSON tokens
-     │      ├─ GET  /stream          → SSE updates
+     │      ├─ GET  /stream          → SSE updates (form state, token changes)
      │      ├─ POST /broadcast_state → share form data
-     │      ├─ POST /execute_os      → launch subprocess, stream output
+     │      ├─ POST /execute_os      → execute OS command (blocking, returns result)
      │      ├─ POST /trigger_callback→ invoke Python function, apply patches
      │      └─ GET  /token-tree      → signed project bundle (--connectable)
      │
      └─► Frontend (index.html)
-            renders tokens, evaluates math, syncs form, streams OS output
+            renders tokens, evaluates math, syncs form, handles page/tab navigation
 ```
 
 Key components:
@@ -251,10 +265,10 @@ Data Endpoints (require authentication in shared mode)
 
 Endpoint Method Authentication Description
 /tokens GET Required Returns the current COMPILED_TOKENS as JSON.
-/stream GET Not checked (inherits page auth) SSE stream for real‑time events.
+/stream GET Not checked (inherits page auth) SSE stream for real‑time events (form state, token updates).
 /token-tree GET Required (master with --connectable) Returns the signed project bundle.
 /broadcast_state POST Required Merges form_state into shared state and broadcasts.
-/execute_os POST Required Validates and executes a registered OS command, returns a stream_id.
+/execute_os POST Required Validates and executes a registered OS command. Returns the command’s output in the HTTP response.
 /trigger_callback POST Required Calls a Python function with form state, applies patches if returned.
 
 SSE Events
@@ -262,8 +276,6 @@ SSE Events
 Event Data Description
 state_update JSON object (form state) Current shared form state. Sent on connect.
 callback_output {"output": "...", "target_id": "..."} Plain string result from a callback.
-os_output_chunk {"stream_id": "...", "text": "..."} A line of command output.
-os_output_done {"stream_id": "...", "target_id": "...", "return_code": int, "final": "..."} Final chunk and exit code.
 tokens_updated JSON array (new tokens) Tokens were modified (callback patches or --watch reload). Frontend re‑renders.
 heartbeat (SSE comment) Keeps connection alive.
 
@@ -294,9 +306,9 @@ This payload is signed with HMAC‑SHA256 using the session key. The client veri
 
 Commands registered with ui.os_command() must exactly match an OS_GATEKEEPER token present in the compiled tokens. This prevents arbitrary command injection from the frontend.
 
-Because the command is executed with shell=True (to support pipes and redirects), only trusted script authors should define OS commands. A future version will add a configurable allow‑list of permitted executables.
+The command is executed synchronously using subprocess.run with shell=True (to support pipes and redirects). The process runs to completion, and its output is captured and returned to the frontend, which displays it in the designated terminal area. Timeout is configurable via --os-timeout (default 5 seconds).
 
-Timeout is configurable via --os-timeout (default 5 seconds). Output is streamed line‑by‑line to the frontend via SSE.
+Security note: Because the command is executed with shell=True, only trusted script authors should define OS commands. A future version will add a configurable allow‑list of permitted executables.
 
 ---
 
@@ -333,14 +345,17 @@ Limitations:
 
 ---
 
-15. Streaming OS Output Internals
+15. Blocking OS Execution Internals
 
-When a valid OS command is triggered:
+When a valid OS command is triggered via the gatekeeper:
 
-1. A subprocess.Popen is created with stdout=PIPE, stderr=STDOUT, text=True, and bufsize=1 (line‑buffered).
-2. A background thread reads lines from process.stdout and broadcasts them as os_output_chunk events.
-3. After the process finishes (or times out), an os_output_done event is sent with the exit code and final message.
-4. The frontend accumulates chunks in the target terminal div, auto‑scrolling to the bottom.
+1. The server validates the command against existing OS_GATEKEEPER tokens.
+2. subprocess.run is called with the command string, shell=True, capture_output=True, text=True, and the configured timeout.
+3. If the command completes successfully, its stdout (or stderr if stdout is empty) is HTML‑escaped and returned in the HTTP response.
+4. If the command times out or raises an exception, an appropriate error message is returned.
+5. The frontend immediately displays the result in the target terminal <div>.
+
+No SSE streaming is used for OS output in the current version.
 
 ---
 
@@ -357,18 +372,26 @@ Errors are logged to the console but do not stop the watcher.
 
 ---
 
-17. Multi‑User & State
+17. Multi‑Page & Tab Support
+
+Pybro now supports multiple pages and tabs within a page. Pages are created with ui.page_start("Page Name") / ui.page_end(). Each page appears as a navigation button at the top of the dashboard, and only the active page’s content is shown.
+
+Inside a page, you can add a tab group with ui.tab_group_start() / ui.tab_group_end(). Individual tabs are defined with ui.tab_start("Tab Name") / ui.tab_end(). The frontend builds a local tab bar and shows only the active tab’s content. All form state is preserved when switching pages or tabs because the underlying DOM nodes are hidden/shown, not destroyed.
+
+---
+
+18. Multi‑User & State
 
 Currently, all connected clients share a single form state (shared_form_state). There is no user isolation or session management. This works well for a single user with multiple devices (or a shared dashboard), but true multi‑user support is a planned enhancement.
 
 ---
 
-18. Limitations & Planned Features
+19. Limitations & Planned Features
 
 Current limitations:
 
 · Complex expressions, nested function definitions, and imports are not evaluated in assignments (only simple calls and literals).
-· OS command timeout is fixed per session (configurable via flag, but not per‑command).
+· OS commands are executed synchronously (blocking); long‑running commands may cause the browser to wait. Real‑time streaming is planned for a future release.
 · SSE streams are not authenticated after the initial connection.
 · Callbacks are restricted to module‑level functions (no lambdas/closures).
 · No persistent state across restarts.
@@ -376,19 +399,19 @@ Current limitations:
 
 Roadmap highlights:
 
-· --watch with clear error messages and line numbers.
+· Clear parser error messages with line numbers.
 · New widgets: password fields, sliders, date pickers, file upload stubs.
 · ui.markdown(text) for static documentation blocks.
 · Dark/light theme toggle.
-· Tabs and multi‑page layouts.
 · Configurable command allow‑list for os_command.
 · Persistent state with --state-file.
 · Custom CSS/JS injection with security gating.
 · Full sandboxing for Mode 2 clients.
+· Return of streaming OS output (optionally).
 
 ---
 
-19. Project Structure
+20. Project Structure
 
 ```
 pybro_ui/
@@ -410,7 +433,7 @@ pybro_ui/
 
 ---
 
-20. License
+21. License
 
 MIT – do whatever you want, just don’t blame us if you point an OS command at something dangerous.
 
