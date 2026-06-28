@@ -377,6 +377,18 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(PROJECT_TOKEN_TREE).encode())
 
+        # --- Serve custom CSS ---
+        elif clean_path == '/custom.css':
+            custom_css_path = getattr(self.server, 'custom_css_path', None)
+            if custom_css_path and os.path.isfile(custom_css_path):
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/css')
+                self.end_headers()
+                with open(custom_css_path, 'rb') as f:
+                    self.wfile.write(f.read())
+            else:
+                self.send_error(404)
+
         elif clean_path in ('', '/', '/index.html'):
             self.send_response(200)
             self.send_header('Content-Type', 'text/html')
@@ -384,7 +396,17 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
             base_dir = os.path.dirname(os.path.abspath(__file__))
             html_path = os.path.join(base_dir, 'index.html')
             with open(html_path, 'rb') as f:
-                self.wfile.write(f.read())
+                html_bytes = f.read()
+
+            # Inject custom CSS link if path is set
+            custom_css_path = getattr(self.server, 'custom_css_path', None)
+            if custom_css_path and os.path.isfile(custom_css_path):
+                html_str = html_bytes.decode('utf-8')
+                link_tag = '<link rel="stylesheet" href="/custom.css">'
+                html_str = html_str.replace('</head>', f'{link_tag}\n</head>')
+                html_bytes = html_str.encode('utf-8')
+
+            self.wfile.write(html_bytes)
         else:
             self.send_error(404)
 
@@ -570,9 +592,15 @@ def main():
     parser.add_argument("--entrypoint", help="Name of the main Python file in Mode 2 (default: main.py or first .py found)")
     parser.add_argument("--os-timeout", type=int, default=5, help="Timeout in seconds for OS commands (default 5)")
     parser.add_argument("--watch", action="store_true", help="Watch the script file for changes and auto‑reload tokens (master mode only)")
+    parser.add_argument("--custom-css", help="Path to a CSS file to override default styles")
     args = parser.parse_args()
 
     port = args.port
+
+    # Validate custom CSS path
+    if args.custom_css and not os.path.isfile(args.custom_css):
+        print(f"[!] Custom CSS file not found: {args.custom_css}")
+        sys.exit(1)
 
     # --- MODE 2: Distributed Sandbox Client ---
     if args.connect:
@@ -826,6 +854,9 @@ def main():
         with ThreadedTCPServer((bind_ip, port), EphemeralServer) as httpd:
             httpd.verbose = args.verbose
             httpd.os_timeout = args.os_timeout
+            # Attach custom CSS path to server instance
+            if args.custom_css:
+                httpd.custom_css_path = os.path.abspath(args.custom_css)
 
             if ssl_context:
                 httpd.socket = ssl_context.wrap_socket(httpd.socket, server_side=True)

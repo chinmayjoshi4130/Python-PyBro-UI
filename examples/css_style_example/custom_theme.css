@@ -1,0 +1,88 @@
+/* Title – larger, different colour, custom underline */
+.main-title {
+    color: var(--accent);
+    font-size: 2.5rem;
+    border-bottom: 3px solid var(--accent);
+}
+
+/* Input – glow on focus */
+.fancy-input input[type="text"] {
+    transition: box-shadow 0.3s;
+}
+.fancy-input input[type="text"]:focus {
+    box-shadow: 0 0 8px var(--accent);
+}
+
+/* Checkbox – accent colour */
+.fancy-check input[type="checkbox"] {
+    accent-color: var(--accent);
+    transform: scale(1.2);
+}
+
+/* Dropdown – custom border and background */
+.fancy-dropdown select {
+    border: 2px solid var(--accent);
+    background: #1a1a2e;
+    color: var(--text);
+}
+
+/* Text area (greeting output) – monospace, brighter */
+.greeting-box textarea {
+    font-family: 'Fira Code', monospace;
+    color: #00e676;
+    background: #0a0f1c;
+    border: 1px solid var(--green);
+}
+
+/* Dynamic urgent output */
+.urgent-output textarea {
+    background: #3a0a0a !important;
+    border-color: var(--red) !important;
+    color: #ff5252 !important;
+}
+
+/* Button – gradient and shadow */
+.primary-btn button[data-callback] {
+    background: linear-gradient(135deg, var(--accent), #b45309);
+    border: none;
+    box-shadow: 0 4px 12px rgba(249,115,22,0.4);
+}
+.primary-btn button[data-callback]:hover {
+    filter: brightness(1.1);
+    transform: translateY(-2px);
+}
+
+/* OS command block */
+.terminal-block button[data-os-cmd] {
+    background: var(--accent);
+    border: none;
+}
+.terminal-block .terminal {
+    background: #0a0a0a;
+    color: #0f0;
+    font-size: 0.9rem;
+    border: 1px solid #0f0;
+}
+
+/* Table – striped rows, header style */
+.data-grid table {
+    border: 1px solid var(--accent);
+}
+.data-grid th {
+    background: var(--accent);
+    color: #000;
+    font-weight: bold;
+    text-transform: uppercase;
+}
+.data-grid td {
+    border-bottom: 1px solid var(--border);
+}
+.data-grid tr:nth-child(even) {
+    background: rgba(255,255,255,0.03);
+}
+
+/* Theme change button */
+.theme-btn button {
+    background: #22c55e;
+    border: none;
+}
