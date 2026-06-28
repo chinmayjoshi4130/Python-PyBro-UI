@@ -23,6 +23,7 @@ def generate_report(form):
     return {
         "message": f"Report updated at {now}",
         "patches": [
-            {"action": "insert_table_row", "token_index": 13, "row": [now, form.get("action", "?"), "OK"]},
+            # Now uses target_id instead of token_index – much safer
+            {"action": "insert_table_row", "target_id": "activity_log", "row": [now, form.get("action", "?"), "OK"]}
         ]
     }

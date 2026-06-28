@@ -4,9 +4,9 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pybro"
-version = "0.2.0"
+version = "0.3.0"
 authors = [
-    { name = "Your Name", email = "your.email@example.com" }
+    { name = "Chinmay Joshi", email = "chinmayjoshi4130@gmail.com" }
 ]
 description = "A lightweight, zero-dependency AST-driven UI runtime compiler for Python scripts."
 readme = "README.md"

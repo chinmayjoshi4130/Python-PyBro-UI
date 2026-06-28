@@ -226,6 +226,12 @@
     </div>
 
     <script>
+        // ========== HELPERS ==========
+        function escapeHtml(text) {
+            const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
+            return String(text).replace(/[&<>"']/g, m => map[m]);
+        }
+    
         let pendingCommand = null;
         let globalMathFormulas = [];
         let callbackButtons = {};
@@ -233,18 +239,21 @@
         let savedFormState = {};
         let activePageName = null;
         let activeTabName = {};
-
+    
+        // Unique generation ID – incremented every full UI rebuild
+        let uiGeneration = 0;
+    
         const urlParams = new URLSearchParams(window.location.search);
         if (urlParams.has('key')) {
             try { sessionStorage.setItem('pybro_session_token', urlParams.get('key')); } catch (e) {}
         }
-
+    
         function getAuthHeaders() {
             let token = null;
             try { token = sessionStorage.getItem('pybro_session_token'); } catch (e) {}
             return token ? { 'X-Pybro-Key': token, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
         }
-
+    
         function getFormState() {
             const state = {};
             document.querySelectorAll('input, select').forEach(el => {
@@ -252,7 +261,7 @@
             });
             return state;
         }
-
+    
         function captureFormState() { savedFormState = getFormState(); }
         function restoreFormState() {
             Object.entries(savedFormState).forEach(([key, value]) => {
@@ -262,7 +271,7 @@
                 else el.value = value;
             });
         }
-
+    
         function evaluateReactiveMath() {
             const state = getFormState();
             globalMathFormulas.forEach(formulaObj => {
@@ -280,17 +289,17 @@
                 } catch(e) { targetElement.innerText = "[Math Error]"; }
             });
         }
-
+    
         function applyRootCSS(cssVars) {
             const root = document.documentElement;
             for (const [prop, value] of Object.entries(cssVars)) root.style.setProperty(prop, value);
         }
-
+    
         function applyComponentCSS(wrapper, token) {
             if (token.css) for (const [p,v] of Object.entries(token.css)) wrapper.style.setProperty(p,v);
             if (token.class) wrapper.classList.add(token.class);
         }
-
+    
         let syncTimeout = null;
         function debouncedSyncFormState() {
             clearTimeout(syncTimeout);
@@ -300,15 +309,15 @@
             const state = getFormState();
             fetch('/broadcast_state', { method: 'POST', headers: getAuthHeaders(), body: JSON.stringify({ form_state: state }) }).catch(() => {});
         }
-
-        // ---------- Page & Tab Structure ----------
+    
+        // ========== PAGE / TAB STRUCTURE ==========
         function buildPageStructure(tokens) {
             const pages = [];
             let currentPage = null;
             let inTabGroup = false;
             let currentTab = null;
             let tabTokens = [];
-
+    
             const flushTab = () => {
                 if (currentTab) {
                     currentTab.tokens = tabTokens;
@@ -318,7 +327,7 @@
                     tabTokens = [];
                 }
             };
-
+    
             tokens.forEach(tok => {
                 if (tok.type === 'PAGE_START') {
                     if (currentPage) pages.push(currentPage);
@@ -348,78 +357,82 @@
             if (currentPage) pages.push(currentPage);
             return pages;
         }
-
+    
         function renderPages(pages) {
             const canvas = document.getElementById('app-canvas');
             const nav = document.getElementById('page-nav');
             canvas.innerHTML = '';
             nav.innerHTML = '';
-
+    
             if (pages.length === 0) return;
-
+    
+            // --- FIX: Reset global maps ONCE before building all pages ---
+            globalMathFormulas = [];
+            callbackButtons = {};
+    
             pages.forEach(page => {
                 const btn = document.createElement('button');
                 btn.className = 'page-nav-btn';
                 btn.innerText = page.name;
                 btn.onclick = () => showPage(page.name);
                 nav.appendChild(btn);
-
+    
                 const pageDiv = document.createElement('div');
                 pageDiv.className = 'page-content';
                 pageDiv.id = 'page-' + page.name.replace(/\s/g, '_');
-
+    
                 if (page.tokens.length > 0) {
                     const pageTokensDiv = document.createElement('div');
                     renderTokens(pageTokensDiv, page.tokens);
                     pageDiv.appendChild(pageTokensDiv);
                 }
-
+    
                 if (page.tabs && page.tabs.length > 0) {
                     const tabBar = document.createElement('div');
                     tabBar.className = 'tab-bar';
                     const tabsContainer = document.createElement('div');
                     tabsContainer.className = 'tabs-container';
-
+    
                     page.tabs.forEach(tab => {
                         const tabBtn = document.createElement('button');
                         tabBtn.className = 'tab-btn';
                         tabBtn.innerText = tab.name;
                         tabBtn.onclick = () => showTab(page.name, tab.name);
                         tabBar.appendChild(tabBtn);
-
+    
                         const tabContent = document.createElement('div');
                         tabContent.className = 'tab-content';
                         tabContent.id = `tab-${page.name.replace(/\s/g, '_')}-${tab.name.replace(/\s/g, '_')}`;
                         renderTokens(tabContent, tab.tokens);
                         tabsContainer.appendChild(tabContent);
                     });
-
+    
                     pageDiv.appendChild(tabBar);
                     pageDiv.appendChild(tabsContainer);
                 }
-
+    
                 canvas.appendChild(pageDiv);
             });
-
+    
             const hash = window.location.hash.substring(1);
             let initialPage = hash || pages[0].name;
             if (!pages.find(p => p.name === initialPage)) initialPage = pages[0].name;
             showPage(initialPage);
         }
-
+    
         function showPage(pageName) {
             document.querySelectorAll('.page-content').forEach(div => div.classList.remove('active'));
             document.querySelectorAll('.page-nav-btn').forEach(btn => btn.classList.remove('active'));
-
+    
             const pageDiv = document.getElementById('page-' + pageName.replace(/\s/g, '_'));
             if (pageDiv) pageDiv.classList.add('active');
             document.querySelectorAll('.page-nav-btn').forEach(btn => {
                 if (btn.innerText === pageName) btn.classList.add('active');
             });
-
+    
             activePageName = pageName;
             window.location.hash = '#' + pageName;
-
+    
             const tabBtns = pageDiv ? pageDiv.querySelectorAll('.tab-btn') : [];
             if (tabBtns.length > 0) {
                 const firstTabName = tabBtns[0].innerText;
@@ -427,27 +440,26 @@
                 else showTab(pageName, activeTabName[pageName]);
             }
         }
-
+    
         function showTab(pageName, tabName) {
             const pageDiv = document.getElementById('page-' + pageName.replace(/\s/g, '_'));
             if (!pageDiv) return;
             pageDiv.querySelectorAll('.tab-content').forEach(tc => tc.classList.remove('active'));
             pageDiv.querySelectorAll('.tab-btn').forEach(tb => tb.classList.remove('active'));
-
+    
             const tabContent = document.getElementById(`tab-${pageName.replace(/\s/g, '_')}-${tabName.replace(/\s/g, '_')}`);
             if (tabContent) tabContent.classList.add('active');
             pageDiv.querySelectorAll('.tab-btn').forEach(btn => {
                 if (btn.innerText === tabName) btn.classList.add('active');
             });
-
+    
             activeTabName[pageName] = tabName;
         }
-
+    
         function renderTokens(container, tokens) {
-            globalMathFormulas = [];
-            callbackButtons = {};
+            // *** NO LONGER resets globalMathFormulas or callbackButtons here ***
             let containers = [container];
-
+    
             tokens.forEach(tok => {
                 if (tok.type === 'SECTION_START') {
                     const sectionDiv = document.createElement('div');
@@ -473,7 +485,7 @@
                     const wrapper = document.createElement('div');
                     wrapper.className = "component";
                     applyComponentCSS(wrapper, tok);
-
+    
                     switch(tok.type) {
                         case "UI_TITLE":
                             const h = document.createElement('h1');
@@ -493,9 +505,11 @@
                             wrapper.innerHTML += `<label>${tok.label}</label><select id="${tok.id}" onchange="evaluateReactiveMath(); debouncedSyncFormState()">${optionsHTML}</select>`;
                             break;
                         case "UI_TEXT_AREA":
-                            wrapper.innerHTML += `<label>${tok.label}</label><textarea id="${tok.id}" readonly>System Idle...</textarea>`;
+                            const textAreaValue = tok.value || "System Idle...";
+                            wrapper.innerHTML += `<label>${tok.label}</label><textarea id="${tok.id}" readonly>${escapeHtml(textAreaValue)}</textarea>`;
                             break;
                         case "UI_CALLBACK_BUTTON":
+                            // Store target_id globally – this will survive across pages now
                             callbackButtons[tok.callback_name] = tok.target_id || null;
                             wrapper.innerHTML += `<button type="button" data-callback="${tok.callback_name}">${tok.text}</button>`;
                             break;
@@ -532,12 +546,14 @@
                 }
             });
         }
-
-        // ---------- Runtime ----------
+    
+        // ========== RUNTIME ==========
         async function initRuntime() {
+            uiGeneration++;          // invalidate any pending callback responses
+            const currentGen = uiGeneration;
             const scrollY = window.scrollY;
             captureFormState();
-
+    
             const targetUrl = '/tokens' + window.location.search;
             try {
                 const res = await fetch(targetUrl, { headers: getAuthHeaders() });
@@ -550,22 +566,23 @@
                     return;
                 }
                 const tokens = await res.json();
+                // Only apply if no newer rebuild has been triggered
+                if (uiGeneration !== currentGen) return;
+    
                 currentTokens = tokens;
-                globalMathFormulas = [];
-                callbackButtons = {};
-
+    
                 const pages = buildPageStructure(tokens);
-                renderPages(pages);
-
+                renderPages(pages);   // this now properly initialises callbackButtons
+    
                 attachGlobalListeners();
                 evaluateReactiveMath();
                 restoreFormState();
                 window.scrollTo(0, scrollY);
             } catch(e) {
-                document.getElementById('app-canvas').innerHTML = `<h2 style="color:var(--red)">Mount Exception: ${e.message || e}</h2>`;
+                console.error("initRuntime error:", e);
             }
         }
-
+    
         function attachGlobalListeners() {
             document.querySelectorAll('button[data-os-cmd]').forEach(btn => {
                 btn.addEventListener('click', function() {
@@ -583,7 +600,7 @@
             document.getElementById('gate-approve-btn').addEventListener('click', () => resolveGatekeeper(true));
             document.getElementById('gate-deny-btn').addEventListener('click', () => resolveGatekeeper(false));
         }
-
+    
         function updateTarget(output, target_id) {
             if (target_id) {
                 const el = document.getElementById(target_id);
@@ -599,17 +616,18 @@
                 }
             }
         }
-
+    
+        // ========== CALLBACKS ==========
         async function resolveGatekeeper(allowed) {
             document.getElementById('gatekeeper-modal').style.display = 'none';
             if (!allowed || !pendingCommand) return;
-
+    
             const res = await fetch('/execute_os', {
                 method: 'POST',
                 headers: getAuthHeaders(),
                 body: JSON.stringify({ cmd: pendingCommand.cmd, target_id: pendingCommand.targetId })
             });
-
+    
             const data = await res.json();
             if (res.status === 403) {
                 updateTarget("Access denied by server.", pendingCommand.targetId);
@@ -618,26 +636,44 @@
             }
             pendingCommand = null;
         }
-
+    
         async function firePythonCallback(name) {
             const target_id = callbackButtons[name] || null;
+            const startGen = uiGeneration;
             updateTarget("[*] Dispatching callback...", target_id);
-            const res = await fetch('/trigger_callback', {
-                method: 'POST',
-                headers: getAuthHeaders(),
-                body: JSON.stringify({ callback_name: name, form_state: getFormState(), target_id: target_id })
-            });
-            const data = await res.json();
-            updateTarget(data.output, data.target_id || target_id);
+    
+            try {
+                const res = await fetch('/trigger_callback', {
+                    method: 'POST',
+                    headers: getAuthHeaders(),
+                    body: JSON.stringify({ callback_name: name, form_state: getFormState(), target_id: target_id })
+                });
+                const data = await res.json();
+                console.log("Callback response:", data);
+    
+                // Ignore stale responses if the UI has been rebuilt since
+                if (uiGeneration !== startGen) {
+                    console.log("UI rebuilt during callback – ignoring manual update.");
+                    return;
+                }
+    
+                // If the server sent ui_patched, the SSE already rebuilt the UI
+                if (!data.ui_patched) {
+                    updateTarget(data.output, data.target_id || target_id);
+                }
+            } catch (err) {
+                console.error("Callback error:", err);
+                updateTarget("Error: " + (err.message || err), target_id);
+            }
         }
-
+    
         function openGatekeeper(cmd, desc, targetId) {
             pendingCommand = { cmd, targetId };
             document.getElementById('gate-desc').innerText = desc;
             document.getElementById('gate-cmd').innerText = cmd;
             document.getElementById('gatekeeper-modal').style.display = 'flex';
         }
-
+    
         function applyRemoteState(newState) {
             Object.entries(newState).forEach(([key, value]) => {
                 const el = document.getElementById(key);
@@ -646,11 +682,12 @@
             });
             evaluateReactiveMath();
         }
-
+    
+        // ========== SSE ==========
         function startSSE() {
             const evtSource = new EventSource('/stream');
             const statusDot = document.getElementById('sse-status');
-
+    
             evtSource.addEventListener('open', () => { statusDot.style.background = '#00e676'; });
             evtSource.addEventListener('callback_output', e => {
                 const data = JSON.parse(e.data);
@@ -660,17 +697,19 @@
                 const state = JSON.parse(e.data);
                 applyRemoteState(state);
             });
-            evtSource.addEventListener('tokens_updated', () => { initRuntime(); });
-
+            evtSource.addEventListener('tokens_updated', () => {
+                console.log("SSE tokens_updated – rebuilding UI");
+                initRuntime();
+            });
+    
             evtSource.onerror = () => {
                 statusDot.style.background = '#ff5252';
                 evtSource.close();
                 setTimeout(startSSE, 3000);
             };
         }
-
+    
         function startPolling() {
-            // Read poll interval injected by server (default 2000 ms)
             const pollMs = parseInt(window.pybroPollInterval) || 2000;
             setInterval(async () => {
                 try {
@@ -686,7 +725,7 @@
                 } catch (e) {}
             }, pollMs);
         }
-
+    
         window.onload = () => {
             initRuntime();
             startSSE();

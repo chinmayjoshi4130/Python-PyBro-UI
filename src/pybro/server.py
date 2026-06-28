@@ -258,7 +258,7 @@ class PybroUIParser(ast.NodeVisitor):
                 elif func_name == 'dropdown' and len(args) >= 3:
                     token = {"type": "UI_DROPDOWN", "id": args[0], "label": args[1], "options": args[2]}
                 elif func_name == 'text_area' and len(args) >= 2:
-                    token = {"type": "UI_TEXT_AREA", "id": args[0], "label": args[1]}
+                    token = {"type": "UI_TEXT_AREA", "id": args[0], "label": args[1], "value": ""}
                 elif func_name == 'button_callback' and len(args) >= 2:
                     target = kwargs.get('target_id', None)
                     if target is None and len(args) >= 3:
@@ -269,7 +269,7 @@ class PybroUIParser(ast.NodeVisitor):
                 elif func_name == 'os_command' and len(args) >= 3:
                     token = {"type": "OS_GATEKEEPER", "cmd": args[0], "desc": args[1], "target_id": args[2]}
                 elif func_name == 'table' and len(args) >= 2:
-                    token = {"type": "UI_TABLE", "headers": args[0], "rows": args[1]}
+                    token = {"type": "UI_TABLE", "headers": args[0], "rows": args[1], "id": kwargs.get("target_id", None)}
                 elif func_name == 'root_css' and len(args) >= 1:
                     token = {"type": "UI_ROOT_CSS", "css_vars": args[0]}
                 else:
@@ -466,6 +466,14 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
             except Exception as e:
                 response_text = html.escape(f"Error: {str(e)}")
 
+            # Persist output in the token tree if target_id matches a text_area
+            if target_id:
+                for t in COMPILED_TOKENS:
+                    if t.get('id') == target_id and t['type'] == 'UI_TEXT_AREA':
+                        t['value'] = response_text
+                        break
+                broadcast_event("tokens_updated", json.dumps(COMPILED_TOKENS))
+
             resp = {"output": response_text, "target_id": target_id}
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
@@ -504,14 +512,23 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
                                             break
                                     continue
 
-                                # --- index‑based actions ---
+                                # --- index‑based or id‑based targeting ---
                                 idx = int(patch.get('token_index', -1))
+                                if idx < 0 and 'target_id' in patch:
+                                    # search for a token with matching id
+                                    for i, t in enumerate(COMPILED_TOKENS):
+                                        if t.get('id') == patch['target_id']:
+                                            idx = i
+                                            break
                                 if idx < 0 or idx >= len(COMPILED_TOKENS):
                                     continue
                                 token = COMPILED_TOKENS[idx]
 
                                 if action == 'set_text':
-                                    token['text'] = str(patch.get('value', ''))
+                                    if token['type'] == 'UI_TEXT_AREA':
+                                        token['value'] = str(patch.get('value', ''))
+                                    else:
+                                        token['text'] = str(patch.get('value', ''))
                                 elif action == 'set_label':
                                     token['label'] = str(patch.get('value', ''))
                                 elif action == 'set_css':
@@ -544,7 +561,20 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
             else:
                 response_text = "Error: Function mapping constraint failure."
 
-            resp = {"output": response_text.strip(), "target_id": target_id}
+            # --- FIX: Persist plain‑text output in the token tree (same as OS commands) ---
+            if target_id and not token_patches and response_text != "UI updated":
+                for t in COMPILED_TOKENS:
+                    if t.get('id') == target_id and t['type'] == 'UI_TEXT_AREA':
+                        t['value'] = response_text
+                        break
+                broadcast_event("tokens_updated", json.dumps(COMPILED_TOKENS))
+
+            # When patches were applied, mark the response so the frontend knows
+            resp = {
+                "output": response_text.strip(),
+                "target_id": target_id,
+                "ui_patched": True if token_patches else False
+            }
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
@@ -553,7 +583,7 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
                 broadcast_event("callback_output", resp)
 
 
-def watch_script(script_path):
+def watch_script(script_path, connectable=False):          # <-- fixed signature
     global COMPILED_TOKENS, TARGET_MODULE, PROJECT_TOKEN_TREE
     last_mtime = os.path.getmtime(script_path)
     while True:
@@ -574,7 +604,7 @@ def watch_script(script_path):
                     spec.loader.exec_module(TARGET_MODULE)
                 except Exception as e:
                     print(f"[!] Warning: could not reload module: {e}")
-                if PROJECT_DIR and SESSION_KEY and getattr(args, 'connectable', False):
+                if PROJECT_DIR and SESSION_KEY and connectable:   # <-- use parameter
                     build_token_tree()
                 broadcast_event("tokens_updated", json.dumps(COMPILED_TOKENS))
                 print("[+] Re‑compile successful. UI refreshed.")
@@ -944,7 +974,8 @@ def main():
 
             if watch and not connect_target:
                 print("[*] Starting file watcher on", script_path)
-                threading.Thread(target=watch_script, args=(script_path,), daemon=True).start()
+                # Pass the connectable flag so the watcher can use it
+                threading.Thread(target=watch_script, args=(script_path, connectable), daemon=True).start()
 
             httpd.serve_forever()
     except KeyboardInterrupt:

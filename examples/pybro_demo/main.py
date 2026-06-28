@@ -63,7 +63,8 @@ ROWS = [
     ["12:00", "start", "OK"],
     ["12:05", "scan", "OK"],
 ]
-ui.table(HEADERS, ROWS, class_="data-grid")
+# Added target_id so we can patch it by name instead of fragile index
+ui.table(HEADERS, ROWS, class_="data-grid", target_id="activity_log")
 
 ui.page_end()
 
