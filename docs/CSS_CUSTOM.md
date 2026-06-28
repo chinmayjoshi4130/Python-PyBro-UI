@@ -120,6 +120,30 @@ Limitations:
 
 ---
 
+🌐 Distributing custom CSS in shared / distributed mode
+
+When you run a master in shared + connectable mode, the custom stylesheet (the one you provide via --custom-css or pybro.toml) is not automatically included in the project bundle sent to clients.
+If you want remote clients to see the same visual theme, you must explicitly add the CSS file to the include list in pybro.toml under [distribute].
+
+How to include a custom stylesheet
+
+1. Place your CSS file somewhere in the project directory (e.g., style.css or theme/custom.css).
+2. Add it to the bundle in pybro.toml:
+
+```toml
+[distribute]
+include = ["main.py", "scanner.py", "style.css"]   # list the CSS file here
+```
+
+3. Start the master with --shared --key secret --connectable.
+
+Now, when a client connects with --connect, the CSS file is downloaded along with the Python code.
+The client automatically detects any .css file in the bundle and serves it as its own custom stylesheet — no extra flags needed.
+
+Note: If you do not include a CSS file, the client will render with the default built‑in styles (dark theme with the standard colour variables). The ui.root_css({...}) tokens are always transmitted, so global variable overrides still work – but any custom class‑based styling or layout changes in the stylesheet will be missing.
+
+---
+
 🔧 Dynamic CSS changes (runtime)
 
 Through the callback token‑patch system, you can alter a widget’s css or class on the fly. The server applies the changes and the UI updates without a page reload.
@@ -223,9 +247,10 @@ Colours, radii, shadows globally ui.root_css({...})
 One widget’s style inline css={"property":"value"} on the token
 Reusable style patterns (including inner elements) class_="my-class" + --custom-css file
 Entire theme / layout overhaul --custom-css your_file.css
+Distribute custom CSS to remote clients Add the CSS file to [distribute] include in pybro.toml
 Change styles at runtime Token patches: set_css, set_class (use target_id)
 Change UI content at runtime Token patches: set_text, insert_table_row, set_options, etc.
 Show/hide predefined blocks without losing state ui.section_start / ui.section_end + toggle_section patch (by section_id)
 Add custom HTML/JS Not yet available (planned)
 
-In practice, most dashboards need only root_css and a few inline css tweaks. For a branded look or specific layout, a custom stylesheet gives you nearly limitless visual freedom, and sections let you build interactive, conditional interfaces.
+In practice, most dashboards need only root_css and a few inline css tweaks. For a branded look or specific layout, a custom stylesheet gives you nearly limitless visual freedom, and sections let you build interactive, conditional interfaces. For team‑wide sharing, remember to bundle your CSS file via pybro.toml so distributed clients can mirror the master’s appearance.

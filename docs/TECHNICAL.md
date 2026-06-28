@@ -28,19 +28,24 @@ pybro_ui/
 │   ├── netsweep/
 │   │   ├── main.py
 │   │   ├── scanner.py
-│   │   └── utils.py
+│   │   ├── utils.py
 │   │   └── pybro.toml
 │   ├── pybro_demo/
 │   │   ├── main.py
 │   │   ├── scanner.py
 │   │   ├── textarea_test.py
-│   │   └── pybro.toml
+│   │   ├── pybro.toml
 │   │   └── theme.css
 │   └── section_demo.py
 └── src/
 └── pybro/
 ├── init.py           # No‑op stub so user scripts can import ui
-├── server.py             # Core engine: AST parsing, tree, HTTP server, SSE
+├── state.py              # Shared globals, locks, and broadcast helper
+├── tree.py               # UINode, flatten/find/build/link, bundling
+├── parser.py             # PybroUIParser – AST → UI tree
+├── handler.py            # EphemeralServer – HTTP, SSE, routes
+├── watcher.py            # watch_script – file‑watcher thread
+├── server.py             # main() – argument parsing & server startup
 ├── index.html            # Single HTML shell, loads the frontend module
 └── static/
 ├── utils.js          # Small helpers (escape, auth headers, CSS injection)
@@ -71,83 +76,119 @@ ui = _UIStub()
 ```
 
 Purpose:
-User scripts import from pybro import ui and then call ui.page_start(...), ui.input_text(...), etc. Without this stub, importing the script would fail because the ui module doesn’t really exist at runtime. The stub makes every call a harmless no‑op, so the user’s script can be imported into the server process without errors. The real UI parsing is done by server.py’s AST visitor — it never uses this stub.
+User scripts import from pybro import ui and then call ui.page_start(...), ui.input_text(...), etc. Without this stub, importing the script would fail because the ui module doesn’t really exist at runtime. The stub makes every call a harmless no‑op, so the user’s script can be imported into the server process without errors. The real UI parsing is done by parser.py’s AST visitor — it never uses this stub.
 
 Important:
 The stub must be in a package named pybro so that from pybro import ui resolves correctly. The server’s sys.path must include the project directory to find this package.
 
 ---
 
-server.py — The engine
+Backend modules (src/pybro/)
 
-Overview
+The backend is split into several files for maintainability. All modules share global state through state.py.
 
-server.py is the entire backend. It does everything:
+state.py – Shared globals and broadcast
 
-· Parses the user script with ast and builds a tree of UI nodes (UINode).
-· Starts an HTTP server with endpoints for tokens, SSE, OS execution, and callbacks.
-· Maintains a global tree lock for thread‑safe mutation.
-· Supports two modes: Master (serves UI) and Distributed Client (downloads code & tokens from a master).
+Contains every piece of mutable state used across the engine:
 
-Architecture highlights
+· UI_ROOT – the root UINode of the UI tree
+· TARGET_MODULE – the imported user module (for callbacks)
+· SESSION_KEY – security key for shared mode
+· PROJECT_TOKEN_TREE – signed bundle for distributed mode
+· PROJECT_DIR, TEMP_DIR – filesystem paths
+· tree_lock, state_lock, sse_lock – thread‑safety locks
+· shared_form_state – form values synced across clients
+· sse_clients – list of active SSE client queues
+· broadcast_event() – sends an event to all SSE clients
 
-Tree data model (UINode)
+Other modules access these variables via state.UI_ROOT, state.tree_lock, etc., never by importing them directly. This ensures that mutations are visible everywhere.
 
-Every UI element becomes a node. The root is UINode('ROOT'). Nodes have:
+---
 
-· type: e.g., "PAGE_START", "UI_INPUT", "UI_TEXT_AREA", "SECTION_START"...
-· attrs: a dict of properties (id, label, visible, etc.)
-· children: a list of child nodes (for containers like sections, rows, pages, tabs).
+tree.py – Tree data model and operations
 
-This replaces the old flat COMPILED_TOKENS list, making patching by target_id robust and eliminating index‑based fragility.
+Defines the UINode class, which represents every UI element:
 
-Flattening
+· type – token type string ("PAGE_START", "UI_INPUT", …)
+· attrs – dict of properties (id, label, visible, …)
+· children – list of child UINodes
 
-flatten_tree(root) recursively walks the tree and produces the flat token list that the frontend expects, automatically inserting end tokens (PAGE_END, SECTION_END, etc.) for containers.
+Key functions:
 
-Thread safety
+· flatten_tree(root) – recursively walks the tree and produces the flat token list the frontend expects, automatically inserting end tokens for containers.
+· find_node_by_id(root, target_id) – walks the tree to find the first node with a matching id attribute. Used by the patch engine and OS command output persistence.
+· build_tree_from_flat(tokens) – reconstructs a UI_ROOT tree from a flat token list (used in Mode 2). Uses start/end token pairs to build the hierarchy.
+· link_tree(node, module) – deferred symbol linker. After the user module is loaded, this replaces headers_ref / rows_ref with the actual values from the module.
+· get_bundle_info() – collects files and dependencies from pybro.toml for distribution.
+· build_token_tree() – creates the HMAC‑signed token tree for secure distribution in --connectable mode.
 
-A tree_lock (threading.Lock()) guards all reads and writes to UI_ROOT. Before any endpoint reads the tree, it acquires the lock and flattens a snapshot. Before any mutation, it locks, changes nodes, flattens, and broadcasts the new tokens via SSE.
+---
 
-AST Parser (PybroUIParser)
+parser.py – AST parser (PybroUIParser)
 
-· Inherits from ast.NodeVisitor.
-· Creates a UINode('ROOT') and a stack of container nodes.
-· On every ui.xxx() call, it extracts arguments using ast.literal_eval (constants) or stores symbolic names for later resolution (e.g., table row variables like ROWS).
-· Does not execute any user code during parsing. Only constants are evaluated.
-· Builds the UI tree directly.
+Inherits from ast.NodeVisitor. This module never executes user code; it only extracts structure and constants.
 
-Deferred symbol linker (link_tree)
+· On encountering ui.xxx() calls, it evaluates arguments via ast.literal_eval when possible, or stores symbolic names (e.g., HEADERS, ROWS) for later linking.
+· Builds the UI_ROOT tree directly using a stack of container nodes.
+· Structural tokens (PAGE_START, SECTION_START, etc.) push/pop the stack; visual tokens become leaf nodes with UINode(type, **attrs).
 
-After the module is loaded (so variables like ROWS exist), link_tree walks the tree and replaces headers_ref / rows_ref with the actual values from the module.
+---
 
-HTTP Server (EphemeralServer)
+handler.py – HTTP request handler (EphemeralServer)
 
-Endpoints:
+Contains the entire HTTP and SSE logic.
 
-· GET /tokens — returns the flattened token list (JSON).
-· GET /stream — SSE event stream.
-· GET /token-tree — signed bundle of tokens + files for distributed mode.
-· GET /custom.css — optional user CSS.
-· GET / or /index.html — serves the HTML shell with optional custom CSS injection and poll‑interval script.
-· GET /static/... — serves static JS/CSS files from the static/ folder.
-· POST /broadcast_state — receives form state from a client and broadcasts to others.
-· POST /execute_os — validates an OS command against the gatekeeper tokens, runs it with shlex.split (no shell=True), optionally checks an allowlist, and updates the target UI_TEXT_AREA.
-· POST /trigger_callback — calls the registered Python function, applies any patches returned, persists plain‑text output into the tree, and broadcasts updates.
+GET endpoints:
 
-Security hardening
+Path Description
+/tokens Returns the flattened token list (JSON), read under tree_lock.
+/stream SSE event stream. Sends heartbeat, tokens_updated, state_update, callback_output.
+/token-tree Signed project bundle for distributed mode (requires --connectable).
+/custom.css Serves the optional custom CSS file.
+/ or /index.html Serves the HTML shell, injecting the custom CSS link and poll‑interval script.
+/static/... Serves front‑end JS/CSS files.
 
-· OS commands use shlex.split() and shell=False → no shell injection.
-· An optional allowed_commands list in pybro.toml restricts which programs can be executed.
-· Callback execution is wrapped with redirect_stdout/redirect_stderr to prevent accidental leaks.
+POST endpoints:
 
-File watcher (watch_script)
+Path Description
+/broadcast_state Receives form state from one client and broadcasts it to all others.
+/execute_os Validates the command against gatekeeper tokens, splits with shlex, optionally checks an allowlist, runs with subprocess.run (no shell=True), and persists output in the target UI_TEXT_AREA.
+/trigger_callback Calls the registered Python function (capturing stdout/stderr), applies any returned patches (by target_id or token_index), persists plain‑text output in the tree, and broadcasts updates.
 
-If --watch is used, a background thread reloads the script, re‑parses the AST, links symbols, and atomically replaces UI_ROOT under the lock. It passes the connectable flag correctly (fixing the earlier NameError).
+Security hardening:
 
-Mode 2 (Distributed Client)
+· OS commands use shlex.split() and shell=False – no shell injection.
+· An optional allowed_commands list in pybro.toml restricts executable programs.
+· Callback execution is wrapped with redirect_stdout / redirect_stderr to prevent accidental server‑side prints.
 
-When --connect is used, the server fetches the signed token tree from a master, reconstructs a UI_ROOT tree from the flat tokens using build_tree_from_flat(), extracts the codebase to a temp directory, optionally installs deps, and then acts as a local server mirroring the master’s UI.
+---
+
+watcher.py – File watcher (watch_script)
+
+When --watch is active, this function runs in a daemon thread:
+
+· Monitors the script file’s modification time.
+· On change: re‑parses the AST, reloads the module, links deferred symbols, atomically replaces state.UI_ROOT and state.TARGET_MODULE under tree_lock, then broadcasts a tokens_updated event.
+· If --connectable is enabled, rebuilds the signed token tree.
+
+---
+
+server.py – Entry point (main())
+
+Handles argument parsing, configuration (CLI + pybro.toml), and server startup.
+
+Modes:
+
+· Mode 0 (Localhost): pybro my_tool.py – binds to 127.0.0.1.
+· Mode 1 (Shared): pybro my_tool.py --shared --key secret – binds to 0.0.0.0, requires authentication.
+· Mode 2 (Distributed Client): pybro --connect <master_ip>:<port> --key secret – downloads the signed token tree, reconstructs the UI tree, extracts the codebase to a temp directory, and acts as a local mirror.
+
+CSS auto‑detection in Mode 2:
+After extracting the bundle, the client automatically searches for any .css file in the temp directory and serves it as the custom stylesheet. This ensures that the master’s visual theme is replicated without extra flags.
+
+SSL setup (optional) – can use a provided certificate or generate a self‑signed one (Python ≥ 3.9).
+
+The server instance (ThreadedTCPServer) is configured with all runtime options (os_timeout, poll_interval, allowed_commands, etc.) and starts EphemeralServer as the handler.
 
 ---
 
@@ -262,6 +303,7 @@ How data flows end‑to‑end
 8. User interacts → inputs fire delegated listeners, reactive math runs, form state syncs to server via /broadcast_state.
 9. User clicks a callback button → app.js sends POST to /trigger_callback, server runs the Python function, applies patches, updates the tree, broadcasts via SSE → frontend rebuilds.
 10. OS commands follow a similar flow through the gatekeeper modal.
+11. In distributed mode, the client automatically picks up any bundled .css file and serves it, mirroring the master’s look.
 
 ---
 
