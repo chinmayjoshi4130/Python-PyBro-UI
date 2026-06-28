@@ -29,3 +29,5 @@ packages = ["src/pybro"]
 [tool.hatch.build.targets.wheel.shared-data]
 # Bundle index.html into the package so it is always available.
 "src/pybro/index.html" = "pybro/index.html"
+# Bundle the whole static/ folder (front‑end modules)
+"src/pybro/static" = "pybro/static"

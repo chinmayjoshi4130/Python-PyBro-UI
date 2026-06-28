@@ -1,440 +1,334 @@
-# Pybro Technical & User Manual
+# TECHNICAL.md — Pybro Internals
 
-This document is the complete guide to pybro, a zero‑dependency Python UI runtime for automation scripts. It covers everything from installation and quick start to the internal architecture, API references, and security model. Use it as your single source of truth for both using and extending pybro.
-
----
-
-## 1. What is Pybro?
-
-Pybro parses declarative UI code from a Python automation script using the standard AST module, compiles it into a list of JSON tokens, and serves them through a lightweight HTTP server. A static frontend (`index.html`) renders the tokens as a responsive web dashboard with real‑time updates for form state and UI changes.
-
-Key characteristics:
-
-- **Zero external dependencies** – the engine uses only Python standard library modules.
-- **In‑memory only** – no database, no file storage; state vanishes when the process stops.
-- **Reactive** – client‑side math, bi‑directional form sync, and automatic UI refresh via Server‑Sent Events.
-- **Modular** – scripts can import helper modules from their own directory.
-- **Portable** – runs anywhere Python does, including Termux on Android.
+Pybro is a zero‑dependency dashboard framework that compiles a Python DSL (calls to a `ui` object) into an interactive HTML UI served over HTTP.  
+This document explains every file in the project, its role, and how the pieces fit together.
 
 ---
 
-## 2. Installation
+## Project file layout
 
-Clone the repository and install in development mode:
-
-```bash
-pip install -e .
 ```
 
-This makes the pybro command available globally in your environment.
+pybro_ui/
+├── LICENSE
+├── README.md
+├── pyproject.toml                # Python packaging metadata
+├── docs/
+│   ├── TECHNICAL.md              # This file
+│   ├── TOKENS.md                 # Token reference (UI components & patches)
+│   ├── CSS_CUSTOM.md             # Styling & customisation guide
+│   └── pybro.toml                # Annotated configuration template
+├── examples/
+│   ├── all_tokens_v4.py
+│   ├── all_patches_demo.py
+│   ├── css_style_example/
+│   │   ├── custom_style_demo.py
+│   │   └── custom_theme.css
+│   ├── mytool.py
+│   ├── netsweep/
+│   │   ├── main.py
+│   │   ├── scanner.py
+│   │   └── utils.py
+│   │   └── pybro.toml
+│   ├── pybro_demo/
+│   │   ├── main.py
+│   │   ├── scanner.py
+│   │   ├── textarea_test.py
+│   │   └── pybro.toml
+│   │   └── theme.css
+│   └── section_demo.py
+└── src/
+└── pybro/
+├── init.py           # No‑op stub so user scripts can import ui
+├── server.py             # Core engine: AST parsing, tree, HTTP server, SSE
+├── index.html            # Single HTML shell, loads the frontend module
+└── static/
+├── utils.js          # Small helpers (escape, auth headers, CSS injection)
+├── state.js          # Form state capture/sync, reactive math
+├── renderer.js       # Builds the DOM from the token tree, page/tab switching
+├── sse.js            # SSE client: reconnects and dispatches events
+├── gatekeeper.js     # OS command modal, execution request to server
+├── poller.js         # Optional fallback polling for token updates
+└── app.js            # Main runtime: wires modules together, manages UI lifecycle
+
+```
+
+User projects typically contain a `pybro.toml` (optional) and one or more Python scripts that use the `ui` DSL.
 
 ---
 
-3. Quick Start
-
-1. Write a blueprint script (e.g. my_tool.py):
+## `src/pybro/__init__.py` — The UI stub
 
 ```python
-from pybro import ui
+class _UIStub:
+    """No‑op stub that accepts any attribute call."""
+    def __getattr__(self, name):
+        def stub(*args, **kwargs):
+            pass
+        return stub
 
-def run_scan(form):
-    return f"Scanning {form.get('host')}..."
-
-ui.root_css({"--accent": "#e94560"})
-ui.title("Network Scanner", css={"fontSize": "2rem"})
-
-ui.row_start(css={"gap": "2rem"})
-ui.input_text("host", "Target Host", css={"border": "2px solid var(--accent)"})
-ui.checkbox("verbose", "Verbose Logging")
-ui.row_end()
-
-ui.text_area("scan_output", "Scan Result")
-ui.button_callback(
-    "Start Scan",
-    "run_scan",
-    target_id="scan_output",
-    css={"background": "linear-gradient(45deg, #e94560, #0f3460)", "border": "none"},
-)
+ui = _UIStub()
 ```
 
-2. Run it:
+Purpose:
+User scripts import from pybro import ui and then call ui.page_start(...), ui.input_text(...), etc. Without this stub, importing the script would fail because the ui module doesn’t really exist at runtime. The stub makes every call a harmless no‑op, so the user’s script can be imported into the server process without errors. The real UI parsing is done by server.py’s AST visitor — it never uses this stub.
 
-```bash
-pybro my_tool.py
-```
-
-Open http://localhost:8080 in any browser.
-
-3. Try the included example:
-
-```bash
-pybro examples/mytool.py
-```
+Important:
+The stub must be in a package named pybro so that from pybro import ui resolves correctly. The server’s sys.path must include the project directory to find this package.
 
 ---
 
-4. UI Token Catalogue
+server.py — The engine
 
-Every visual token accepts optional keyword arguments css (dictionary of inline styles) and class_ (CSS class string). Some tokens also recognise target_id.
+Overview
 
-Structural Tokens (Pages & Tabs)
+server.py is the entire backend. It does everything:
 
-Python call Token type Description
-ui.page_start("Name") PAGE_START Begins a new page. All following tokens belong to this page until PAGE_END.
-ui.page_end() PAGE_END Ends the current page.
-ui.tab_group_start() TAB_GROUP_START Opens a tab group inside the current page.
-ui.tab_start("Tab Name") TAB_START Starts a named tab within the tab group.
-ui.tab_end() TAB_END Ends the current tab.
-ui.tab_group_end() TAB_GROUP_END Ends the tab group.
+· Parses the user script with ast and builds a tree of UI nodes (UINode).
+· Starts an HTTP server with endpoints for tokens, SSE, OS execution, and callbacks.
+· Maintains a global tree lock for thread‑safe mutation.
+· Supports two modes: Master (serves UI) and Distributed Client (downloads code & tokens from a master).
 
-Visual Tokens
+Architecture highlights
 
-Call Token Type Description Key Fields
-ui.title(text) UI_TITLE Header block. text
-ui.row_start() LAYOUT_ROW_START Begins a horizontal flex row. –
-ui.row_end() LAYOUT_ROW_END Ends the current row, returns to vertical stacking. –
-ui.input_text(id, label) UI_INPUT Text entry field. id, label
-ui.checkbox(id, label) UI_CHECKBOX Boolean toggle. id, label
-ui.dropdown(id, label, options) UI_DROPDOWN Drop‑down selection. id, label, options
-ui.text_area(id, label) UI_TEXT_AREA Read‑only output textarea. id, label
-ui.math_compute(target_id, formula) UI_MATH_COMPUTE Client‑side expression with {placeholder} substitution. target_id, formula
-ui.button_callback(text, function, target_id?) UI_CALLBACK_BUTTON Triggers a Python function. target_id can be positional or keyword. text, callback_name, target_id
-ui.os_command(cmd, desc, target_id) OS_GATEKEEPER Shell command with gatekeeper confirmation. Output is shown after the command completes (blocking execution). cmd, desc, target_id
-ui.table(headers, rows) UI_TABLE Static table. headers, rows
-ui.root_css(vars_dict) UI_ROOT_CSS Overrides global CSS custom properties. css_vars
+Tree data model (UINode)
 
----
+Every UI element becomes a node. The root is UINode('ROOT'). Nodes have:
 
-5. Styling & Theme
+· type: e.g., "PAGE_START", "UI_INPUT", "UI_TEXT_AREA", "SECTION_START"...
+· attrs: a dict of properties (id, label, visible, etc.)
+· children: a list of child nodes (for containers like sections, rows, pages, tabs).
 
-The frontend uses CSS variables for consistent theming. Default values:
+This replaces the old flat COMPILED_TOKENS list, making patching by target_id robust and eliminating index‑based fragility.
 
-```css
---bg: #0b0f19;
---surface: #131a2b;
---border: #2a3350;
---text: #e0e6f0;
---accent: #6e8efb;
---green: #00e676;
---red: #ff5252;
---radius: 12px;
---shadow: 0 8px 24px rgba(0,0,0,0.6);
-```
+Flattening
 
-Override them globally with ui.root_css():
+flatten_tree(root) recursively walks the tree and produces the flat token list that the frontend expects, automatically inserting end tokens (PAGE_END, SECTION_END, etc.) for containers.
 
-```python
-ui.root_css({"--bg": "#ffffff", "--accent": "#ff6600"})
-```
+Thread safety
 
-Individual components can receive css and class_ arguments. For UI_TITLE, these are applied directly to the <h1> element; for all other tokens, they are applied to the wrapper <div>.
+A tree_lock (threading.Lock()) guards all reads and writes to UI_ROOT. Before any endpoint reads the tree, it acquires the lock and flattens a snapshot. Before any mutation, it locks, changes nodes, flattens, and broadcasts the new tokens via SSE.
 
----
+AST Parser (PybroUIParser)
 
-6. Callbacks & Form Data
+· Inherits from ast.NodeVisitor.
+· Creates a UINode('ROOT') and a stack of container nodes.
+· On every ui.xxx() call, it extracts arguments using ast.literal_eval (constants) or stores symbolic names for later resolution (e.g., table row variables like ROWS).
+· Does not execute any user code during parsing. Only constants are evaluated.
+· Builds the UI tree directly.
 
-Callback functions (referenced in button_callback) receive a single dictionary with the current values of all input widgets, keyed by their id. Checkbox values are bool, everything else is str.
+Deferred symbol linker (link_tree)
 
-Example:
+After the module is loaded (so variables like ROWS exist), link_tree walks the tree and replaces headers_ref / rows_ref with the actual values from the module.
 
-```python
-def my_callback(form):
-    host = form['host']          # string
-    verbose = form['verbose']    # bool
-    return f"Host: {host}, Verbose: {verbose}"
-```
+HTTP Server (EphemeralServer)
 
-Dynamic UI Updates (Token Patches)
+Endpoints:
 
-A callback may return a list of patch dictionaries instead of a plain string. Each patch modifies a token in the running COMPILED_TOKENS list, and the UI is instantly refreshed for all connected clients.
+· GET /tokens — returns the flattened token list (JSON).
+· GET /stream — SSE event stream.
+· GET /token-tree — signed bundle of tokens + files for distributed mode.
+· GET /custom.css — optional user CSS.
+· GET / or /index.html — serves the HTML shell with optional custom CSS injection and poll‑interval script.
+· GET /static/... — serves static JS/CSS files from the static/ folder.
+· POST /broadcast_state — receives form state from a client and broadcasts to others.
+· POST /execute_os — validates an OS command against the gatekeeper tokens, runs it with shlex.split (no shell=True), optionally checks an allowlist, and updates the target UI_TEXT_AREA.
+· POST /trigger_callback — calls the registered Python function, applies any patches returned, persists plain‑text output into the tree, and broadcasts updates.
 
-Available patch actions:
+Security hardening
 
-Action Effect Extra Fields
-set_text Changes UI_TITLE.text or UI_CALLBACK_BUTTON.text value (str)
-set_label Changes a label (UI_INPUT, UI_CHECKBOX, etc.) value (str)
-set_css Replaces inline CSS value (dict)
-set_class Replaces CSS class value (str)
-insert_table_row Appends a row to a UI_TABLE row (list)
-set_table_rows Replaces all rows rows (list of lists)
-set_options Replaces dropdown options options (list)
+· OS commands use shlex.split() and shell=False → no shell injection.
+· An optional allowed_commands list in pybro.toml restricts which programs can be executed.
+· Callback execution is wrapped with redirect_stdout/redirect_stderr to prevent accidental leaks.
 
-Note: token_index refers to the zero‑based position of the token in COMPILED_TOKENS. The first ui.* call is index 0, and structural tokens (PAGE_START, ROW_START, etc.) are included in the indexing. Inspect /tokens in the browser to see the exact order.
+File watcher (watch_script)
 
-Example callback that adds a row to a table and updates a title:
+If --watch is used, a background thread reloads the script, re‑parses the AST, links symbols, and atomically replaces UI_ROOT under the lock. It passes the connectable flag correctly (fixing the earlier NameError).
 
-```python
-def handle_click(form):
-    return [
-        {"action": "insert_table_row", "token_index": 2, "row": [form['name'], "active"]},
-        {"action": "set_text", "token_index": 0, "value": "Updated Dashboard"}
-    ]
-```
+Mode 2 (Distributed Client)
 
-The server applies patches, broadcasts tokens_updated via SSE, and the frontend re‑renders.
+When --connect is used, the server fetches the signed token tree from a master, reconstructs a UI_ROOT tree from the flat tokens using build_tree_from_flat(), extracts the codebase to a temp directory, optionally installs deps, and then acts as a local server mirroring the master’s UI.
 
 ---
 
-7. Deployment Modes
+index.html — The shell
 
-Mode 0 – Localhost (Default)
+This is a minimal HTML file. It contains:
 
-```bash
-pybro my_tool.py
-```
+· All CSS styles for the dashboard (custom properties, component styling, modals, etc.).
+· A <div id="page-nav"> placeholder for page buttons.
+· A <div id="app-canvas"> where the UI is rendered.
+· A gatekeeper modal (hidden by default).
+· A small SSE status dot.
+· One line that loads the frontend as a module:
+  ```html
+  <script type="module" src="/static/app.js"></script>
+  ```
+· At the end of <body>, the server injects a <script> tag with window.pybroPollInterval so the poller module knows the interval.
 
-Binds to 127.0.0.1. No authentication. The browser opens automatically.
-
-Mode 1 – Shared Team Hub
-
-```bash
-pybro my_tool.py --shared --key mysecret
-```
-
-Binds to 0.0.0.0. Access requires the key via ?key=... or X-Pybro-Key header. If --key is omitted, a random hex token is generated and printed. With --connectable, the master also builds a cryptographically signed project tree that remote clients can download.
-
-Mode 2 – Distributed Sandbox Client (Experimental)
-
-```bash
-pybro --connect 192.168.1.45:8080 --key mysecret
-```
-
-Fetches the signed token tree from the remote master, extracts project files to a temporary directory, imports the script, and serves the UI locally on 127.0.0.1. Callbacks and OS commands run on the client side. Temporary files are deleted on exit, unless --keep-script is used. If the remote project declares external dependencies (pybro.toml), pass --allow-deps to install them in an ephemeral venv.
-
-Tip: If running master and client on the same machine, give the client a different port with --port 8081.
+No other JavaScript is embedded — all logic resides in static/.
 
 ---
 
-8. Advanced Command‑Line Options
+Frontend modules (static/)
 
-Flag Effect
---port 9090 Change the listening port (default 8080).
---verbose Print Apache‑style HTTP request logs.
---key <secret> Set the security key explicitly (shared mode / --connect).
---keep-script In Mode 2, retain the downloaded project directory after shutdown.
---ssl Serve over HTTPS. Requires --cert-file/--key-file or auto‑generation (Python ≥ 3.9).
---cert-file <path> Path to TLS certificate (PEM).
---key-file <path> Path to TLS private key (PEM).
---allow-deps In Mode 2, auto‑install dependencies from pybro.toml into a temporary venv.
---entrypoint <file> In Mode 2, specify the main script filename (default: main.py or first .py).
---os-timeout <int> Timeout for OS commands in seconds (default 5).
---watch Watch the script file for changes; re‑compile tokens and push UI updates live.
+All files are ES modules (.js), loaded directly by the browser without any build step.
 
----
+utils.js
 
-9. Architecture & Internal Flow
+Exports small helper functions:
 
-```
-User Script (.py)
-     │
-     ▼
- AST Parser (PybroUIParser)
-     │  (uses TARGET_MODULE for function‑call eval)
-     ▼
- COMPILED_TOKENS (global list)
-     │
-     ├─► EphemeralServer (HTTP)
-     │      ├─ GET  /tokens          → JSON tokens
-     │      ├─ GET  /stream          → SSE updates (form state, token changes)
-     │      ├─ POST /broadcast_state → share form data
-     │      ├─ POST /execute_os      → execute OS command (blocking, returns result)
-     │      ├─ POST /trigger_callback→ invoke Python function, apply patches
-     │      └─ GET  /token-tree      → signed project bundle (--connectable)
-     │
-     └─► Frontend (index.html)
-            renders tokens, evaluates math, syncs form, handles page/tab navigation
-```
+· escapeHtml(text) — prevents XSS when inserting user‑supplied text.
+· getAuthHeaders() — reads the session token from sessionStorage and returns an object for fetch.
+· applyRootCSS(cssVars) — sets CSS custom properties on :root.
+· applyComponentCSS(wrapper, token) — applies inline css and class from a token to a DOM element.
 
-Key components:
+Used by other modules.
 
-· PybroUIParser – walks the script AST; collects assignments and UI calls, populates COMPILED_TOKENS. If given a module, it can evaluate simple function calls in assignments (e.g. HEADERS = get_headers()) so that the token receives the actual result, not a placeholder string.
-· TARGET_MODULE – the imported user script. Used for callbacks and (optionally) for function evaluation during parsing.
-· EphemeralServer – handles HTTP requests, SSE broadcasting, command execution, and token patching.
-· broadcast_event() – pushes events to all connected SSE clients using a thread‑safe queue.
+state.js
 
----
+Manages form state and reactive math.
 
-10. Server API Reference
+· getFormState() — collects values of all visible input and select elements.
+· captureFormState() / restoreFormState() — saves/restores form state across UI rebuilds.
+· debouncedSyncFormState() — sends the current state to the server (/broadcast_state) after a short delay.
+· evaluateReactiveMath() — re‑evaluates all registered math formulas, replacing placeholders like {some_id} with current form values.
+· setMathFormulas(formulas) / getMathFormulas() — getter/setter for the global formula list.
 
-Static Files
+renderer.js
 
-Endpoint Method Description
-/ or /index.html GET Returns the frontend HTML.
+The largest module; builds the DOM from tokens and handles navigation.
 
-Data Endpoints (require authentication in shared mode)
+· buildPageStructure(tokens) — parses the flat token list into a nested array of pages, tabs, and tokens.
+· renderPages(pages) — creates page navigation buttons and page containers, calls renderTokens for each page/tab content. Resets callbackButtons and globalMathFormulas once per full rebuild.
+· renderTokens(container, tokens) — walks through a token list and creates appropriate DOM elements (inputs, buttons, textareas, tables, etc.), respecting sections and rows via a container stack.
+· showPage(pageName), showTab(pageName, tabName) — manage visibility classes and update location.hash.
+· attachGlobalListeners() — now a no‑op because all input/button events are handled by delegation (see ensureGlobalDelegation).
+· ensureGlobalDelegation() — attaches one delegated listener to the document for:
+  · input/change on all input, select elements → triggers reactive math and state sync.
+  · click on button[data-os-cmd] → opens gatekeeper modal.
+  · click on button[data-callback] → fires a custom pybro:callback event that app.js listens for.
 
-Endpoint Method Authentication Description
-/tokens GET Required Returns the current COMPILED_TOKENS as JSON.
-/stream GET Not checked (inherits page auth) SSE stream for real‑time events (form state, token updates).
-/token-tree GET Required (master with --connectable) Returns the signed project bundle.
-/broadcast_state POST Required Merges form_state into shared state and broadcasts.
-/execute_os POST Required Validates and executes a registered OS command. Returns the command’s output in the HTTP response.
-/trigger_callback POST Required Calls a Python function with form state, applies patches if returned.
+This delegation eliminates listener bloat and makes section toggles instant.
 
-SSE Events
+sse.js
 
-Event Data Description
-state_update JSON object (form state) Current shared form state. Sent on connect.
-callback_output {"output": "...", "target_id": "..."} Plain string result from a callback.
-tokens_updated JSON array (new tokens) Tokens were modified (callback patches or --watch reload). Frontend re‑renders.
-heartbeat (SSE comment) Keeps connection alive.
+Encapsulates the EventSource connection.
 
----
+· startSSE({ onTokensUpdated, onStateUpdate, onCallbackOutput }) — connects to /stream, listens for open, tokens_updated, state_update, callback_output events, and calls the provided callbacks.
+· On error, it closes the connection and retries after 3 seconds.
 
-11. Authentication & Session Key
+gatekeeper.js
 
-In shared mode (or when --connectable is used), a session key is generated or supplied. The key must be included in:
+Handles the OS command execution modal.
 
-· The URL query string ?key=<key>
-· Or the X-Pybro-Key HTTP header.
+· openGatekeeper(cmd, desc, targetId) — shows the modal with command details.
+· resolveGatekeeper(allowed) — hides modal; if allowed, sends a POST to /execute_os and updates the target terminal/text area.
+· updateTarget(output, target_id) — safely updates a DOM element by id (textarea value or div innerText). Falls back to the first textarea / .terminal if no ID given.
 
-The /stream endpoint does not check the key after the initial page load, because the page itself already includes the key.
+poller.js
 
-Signed Token Tree
+A fallback polling mechanism for when SSE isn’t enough.
 
-When --connectable is active, the master constructs a JSON payload containing:
+· startPolling(onNewTokens, getCurrentTokens) — periodically fetches /tokens, compares the JSON snapshot to the current one, and calls onNewTokens if they differ.
+· The interval is read from window.pybroPollInterval (set by the server).
 
-· ui_tokens
-· files (a dictionary of relative paths to file contents for all bundled .py files)
-· requires (external dependencies)
+app.js
 
-This payload is signed with HMAC‑SHA256 using the session key. The client verifies the signature to ensure code integrity and authenticity.
+The orchestrator. It imports all other modules and ties them together:
+
+· Stores session key from URL params into sessionStorage.
+· initRuntime() — fetches tokens, builds pages, renders them, sets up global delegation (once), restores form state, and handles access‑denied states.
+· firePythonCallback(name) — looks up the button’s target_id from callbackButtons (set by renderer.js), sends a POST to /trigger_callback, and updates the target element if no UI patch was broadcast.
+· Listens for the custom pybro:callback event to dispatch callbacks.
+· Sets up gatekeeper approve/deny buttons.
+· On window.onload:
+  1. Calls ensureGlobalDelegation() to activate delegated listeners.
+  2. Calls initRuntime() for the initial render.
+  3. Starts SSE with callbacks that rebuild UI on token change, apply remote state, and handle callback output.
+  4. Starts polling as a safety net.
 
 ---
 
-12. OS Command Execution & Security
+How data flows end‑to‑end
 
-Commands registered with ui.os_command() must exactly match an OS_GATEKEEPER token present in the compiled tokens. This prevents arbitrary command injection from the frontend.
-
-The command is executed synchronously using subprocess.run with shell=True (to support pipes and redirects). The process runs to completion, and its output is captured and returned to the frontend, which displays it in the designated terminal area. Timeout is configurable via --os-timeout (default 5 seconds).
-
-Security note: Because the command is executed with shell=True, only trusted script authors should define OS commands. A future version will add a configurable allow‑list of permitted executables.
+1. User writes my_script.py with ui.xxx(...) calls.
+2. Server starts, imports the script (using the stub pybro package), then parses it with PybroUIParser → builds a UINode tree.
+3. Server loads the module (so callbacks are available), runs link_tree to resolve variable references.
+4. Server starts HTTP server.
+5. Browser loads index.html, which imports app.js and its dependencies.
+6. app.js fetches /tokens → receives flattened token list.
+7. renderer.js rebuilds the DOM from tokens, activating page/tab navigation and rendering all components.
+8. User interacts → inputs fire delegated listeners, reactive math runs, form state syncs to server via /broadcast_state.
+9. User clicks a callback button → app.js sends POST to /trigger_callback, server runs the Python function, applies patches, updates the tree, broadcasts via SSE → frontend rebuilds.
+10. OS commands follow a similar flow through the gatekeeper modal.
 
 ---
 
-13. Configuration File – pybro.toml
+Security considerations
 
-For multi‑file projects or when distributing a project (Mode 2), a pybro.toml file placed in the project root controls bundling and dependencies.
+· Shell injection: Fixed by using shlex.split() and shell=False.
+· Command allowlist: Optional via [pybro] allowed_commands in pybro.toml.
+· Session key: Passed via X-Pybro-Key header or ?key= URL parameter. Stored in sessionStorage on the client.
+· Distributed mode: The token tree is HMAC‑signed, preventing tampering. Clients must provide the same key to verify.
+· Callback output: Captured with redirect_stdout/stderr to avoid accidental server‑side prints.
+· Thread safety: tree_lock prevents race conditions when the file‑watcher, SSE broadcaster, and request handlers mutate the UI tree simultaneously.
+
+---
+
+Configuring via pybro.toml
+
+All settings can be overridden in a pybro.toml file placed in the project root.
+The file uses standard TOML syntax. Every option is optional; omitted values fall back to the defaults listed below.
+
+[pybro] section – Engine settings
+
+Key Type Default Description
+entrypoint string auto‑detect (main.py or first .py) Main Python script to run.
+port integer 8080 HTTP server port.
+shared boolean false Bind to all interfaces (0.0.0.0) instead of 127.0.0.1.
+key string random hex Security key for shared mode.
+connectable boolean false Allow remote clients to download the signed project tree (requires shared).
+watch boolean false Watch the main script for changes and auto‑reload tokens.
+ssl boolean false Enable HTTPS.
+cert-file string – Path to TLS certificate (PEM). Required if ssl = true and no auto‑gen.
+key-file string – Path to TLS private key (PEM). Required if ssl = true and no auto‑gen.
+os-timeout integer 5 Timeout in seconds for OS commands.
+custom-css string – Path to a CSS file loaded after built‑in styles.
+poll-interval integer 2000 Polling fallback interval in milliseconds.
+connect string – Remote master address for Mode 2 (e.g., 192.168.1.45:8080).
+allow-deps boolean false In Mode 2, install dependencies from [distribute] into a temp venv.
+keep-script boolean false In Mode 2, keep the downloaded codebase after exit.
+verbose boolean false Enable Apache‑style HTTP request logs.
+allowed_commands list of strings – (allow all) Restrict OS commands to this list (first word of command).
+
+[distribute] section – Distribution / bundling
+
+Used for Mode 2 and for building a shareable bundle.
+
+Key Type Default Description
+include list of paths (all .py files, excluding common dirs) Files or directories to include in the bundle.
+requires list of strings [] Pip dependencies to install (e.g., "requests>=2.25").
+
+Example pybro.toml:
 
 ```toml
+[pybro]
+port = 8080
+shared = false
+watch = true
+custom-css = "style/custom.css"
+allowed_commands = ["ping", "echo", "ls"]
+poll-interval = 2000
+os-timeout = 10
+
 [distribute]
-# Files or directories to include in the distributed bundle.
-# Default: all .py files (excluding .git, __pycache__, venv, etc.)
-include = ["main.py", "scanner/", "utils.py"]
-
-# Pip dependencies required by the project.
-requires = ["requests>=2.25", "rich"]
+include = ["pages/", "utils.py"]
+requires = ["requests"]
 ```
 
-The master uses this file to build the signed token tree. The client installs requires only if --allow-deps is passed.
+CLI flags (e.g., --port 9000) override any matching pybro.toml values.
 
 ---
 
-14. AST Parser Details
-
-The parser (PybroUIParser) extends ast.NodeVisitor. It processes:
-
-· Top‑level assignments – constants are evaluated with ast.literal_eval; function calls are evaluated via _safe_eval if a module is provided. Results are stored in var_table.
-· UI calls – ui.title(...), ui.input_text(...), etc. Arguments are either literal values, variable names resolved from var_table, or function calls that _safe_eval attempts to execute.
-· Keyword arguments – css, class_, and target_id are explicitly recognized and transferred to the token.
-
-Limitations:
-
-· Only simple function calls (e.g. my_func(args)) are evaluated; attribute chains like module.func() are not.
-· The function must exist in the module’s namespace and be safe to call at parse time (no persistent side‑effects).
-
----
-
-15. Blocking OS Execution Internals
-
-When a valid OS command is triggered via the gatekeeper:
-
-1. The server validates the command against existing OS_GATEKEEPER tokens.
-2. subprocess.run is called with the command string, shell=True, capture_output=True, text=True, and the configured timeout.
-3. If the command completes successfully, its stdout (or stderr if stdout is empty) is HTML‑escaped and returned in the HTTP response.
-4. If the command times out or raises an exception, an appropriate error message is returned.
-5. The frontend immediately displays the result in the target terminal <div>.
-
-No SSE streaming is used for OS output in the current version.
-
----
-
-16. File Watcher (--watch)
-
-When --watch is active (master modes only), a daemon thread polls the script file’s modification time every 2 seconds. On a change:
-
-· The AST is re‑parsed and COMPILED_TOKENS is replaced.
-· The target module is re‑imported (so callbacks pick up code changes).
-· If --connectable is on, the token tree is rebuilt.
-· A tokens_updated SSE event is broadcast, causing all browsers to re‑render.
-
-Errors are logged to the console but do not stop the watcher.
-
----
-
-17. Multi‑Page & Tab Support
-
-Pybro now supports multiple pages and tabs within a page. Pages are created with ui.page_start("Page Name") / ui.page_end(). Each page appears as a navigation button at the top of the dashboard, and only the active page’s content is shown.
-
-Inside a page, you can add a tab group with ui.tab_group_start() / ui.tab_group_end(). Individual tabs are defined with ui.tab_start("Tab Name") / ui.tab_end(). The frontend builds a local tab bar and shows only the active tab’s content. All form state is preserved when switching pages or tabs because the underlying DOM nodes are hidden/shown, not destroyed.
-
----
-
-18. Multi‑User & State
-
-Currently, all connected clients share a single form state (shared_form_state). There is no user isolation or session management. This works well for a single user with multiple devices (or a shared dashboard), but true multi‑user support is a planned enhancement.
-
----
-
-19. Limitations & Planned Features
-
-Current limitations:
-
-· Complex expressions, nested function definitions, and imports are not evaluated in assignments (only simple calls and literals).
-· OS commands are executed synchronously (blocking); long‑running commands may cause the browser to wait. Real‑time streaming is planned for a future release.
-· SSE streams are not authenticated after the initial connection.
-· Callbacks are restricted to module‑level functions (no lambdas/closures).
-· No persistent state across restarts.
-· Table cells that contain HTML‑like strings are rendered as plain text only (no XSS risk).
-
-Roadmap highlights:
-
-· Clear parser error messages with line numbers.
-· New widgets: password fields, sliders, date pickers, file upload stubs.
-· ui.markdown(text) for static documentation blocks.
-· Dark/light theme toggle.
-· Configurable command allow‑list for os_command.
-· Persistent state with --state-file.
-· Custom CSS/JS injection with security gating.
-· Full sandboxing for Mode 2 clients.
-· Return of streaming OS output (optionally).
-
----
-
-20. Project Structure
-
-```
-pybro_ui/
-├── pyproject.toml
-├── README.md
-├── examples/
-│   ├── mytool.py
-│   └── netsweep/
-│       ├── main.py
-│       ├── scanner.py
-│       ├── utils.py
-│       └── pybro.toml
-└── src/
-    └── pybro/
-        ├── __init__.py         # exports the `ui` stub
-        ├── index.html          # frontend (static, zero‑dependency)
-        └── server.py           # runtime engine
-```
-
----
-
-21. License
-
-MIT – do whatever you want, just don’t blame us if you point an OS command at something dangerous.
-
-For the very latest updates and community contributions, see the repository issues and pull requests.
+This document covers every file and its role in Pybro’s architecture. The system is designed to be fully zero‑dependency, single‑binary friendly, yet flexible enough for LAN dashboards and distributed team automation.

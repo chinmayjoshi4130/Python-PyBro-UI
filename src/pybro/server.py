@@ -22,7 +22,10 @@ import html
 import time
 import uuid
 import types
+import shlex
+import io
 from queue import Queue
+from contextlib import redirect_stdout, redirect_stderr
 
 # --- tomllib / tomli fallback ---
 try:
@@ -134,23 +137,6 @@ def get_bundle_info():
 def flatten_tree(node):
     """Recursively flatten the tree back into the token list expected by the frontend."""
     tokens = []
-    stack = [node]
-    while stack:
-        current = stack.pop()
-        if current.type == 'ROOT':
-            # root is invisible, just visit children
-            stack.extend(reversed(current.children))
-            continue
-        tokens.append(current.to_dict())
-        if current.children:
-            # structural nodes may have children that should appear after them
-            if current.type in ('SECTION_START', 'LAYOUT_ROW_START', 'PAGE_START', 'TAB_START', 'TAB_GROUP_START'):
-                # we need to push children first, then the end token after, but order is tricky.
-                # Instead, we'll handle by traversing children then pushing end tokens.
-                pass
-    # The current flattening via simple recursion doesn't handle structural closure tokens.
-    # Let's re-implement properly.
-    tokens.clear()
     def walk(n):
         if n.type == 'ROOT':
             for child in n.children:
@@ -159,7 +145,6 @@ def flatten_tree(node):
         tokens.append(n.to_dict())
         for child in n.children:
             walk(child)
-        # If the node is a container that requires an end token, append one.
         end_map = {
             'SECTION_START': 'SECTION_END',
             'LAYOUT_ROW_START': 'LAYOUT_ROW_END',
@@ -219,7 +204,6 @@ def link_tree(node, module):
             link_tree(child, module)
         return
 
-    # Resolve table rows/headers from references
     if node.type == 'UI_TABLE':
         headers_ref = node.attrs.pop('headers_ref', None)
         rows_ref = node.attrs.pop('rows_ref', None)
@@ -228,8 +212,6 @@ def link_tree(node, module):
         if rows_ref and module and hasattr(module, rows_ref):
             node.attrs['rows'] = getattr(module, rows_ref)
 
-    # Resolve math formulas? For now, formulas are strings, no change.
-    # Resolve other possible refs...
     for child in node.children:
         link_tree(child, module)
 
@@ -238,17 +220,15 @@ def link_tree(node, module):
 class PybroUIParser(ast.NodeVisitor):
     def __init__(self):
         self.root = UINode('ROOT')
-        self.stack = [self.root]   # current container stack
+        self.stack = [self.root]
 
     def _safe_literal(self, node):
         """Safely evaluate constant nodes only. Returns the value or an unresolved symbol name."""
         if isinstance(node, ast.Constant):
             return node.value
         if isinstance(node, ast.Name):
-            # Return the identifier string for deferred resolution
             return node.id
         if isinstance(node, ast.Call):
-            # For now, we do not resolve calls during parsing.
             return None
         try:
             return ast.literal_eval(node)
@@ -287,7 +267,6 @@ class PybroUIParser(ast.NodeVisitor):
                         except Exception:
                             kwargs['visible'] = True
                     else:
-                        # unknown kwargs stored as literal if possible
                         try:
                             kwargs[kw.arg] = ast.literal_eval(kw.value)
                         except Exception:
@@ -340,7 +319,7 @@ class PybroUIParser(ast.NodeVisitor):
                 elif func_name == 'button_callback' and len(args) >= 2:
                     target = kwargs.get('target_id', None)
                     if target is None and len(args) >= 3:
-                        target = args[2]   # positional target_id
+                        target = args[2]
                     token_type = "UI_CALLBACK_BUTTON"
                     attrs = {"text": args[0], "callback_name": args[1], "target_id": target}
                 elif func_name == 'math_compute' and len(args) >= 2:
@@ -351,7 +330,6 @@ class PybroUIParser(ast.NodeVisitor):
                     attrs = {"cmd": args[0], "desc": args[1], "target_id": args[2]}
                 elif func_name == 'table' and len(args) >= 2:
                     token_type = "UI_TABLE"
-                    # If args are not literals, store the identifier name for later resolution
                     if isinstance(args[0], str) and not args[0].isdigit():
                         attrs["headers_ref"] = args[0]
                     else:
@@ -361,7 +339,6 @@ class PybroUIParser(ast.NodeVisitor):
                             attrs["rows_ref"] = args[1]
                         else:
                             attrs["rows"] = args[1]
-                    # target_id for table can be passed as kwarg or third positional
                     table_id = kwargs.get('target_id', None)
                     if table_id is None and len(args) >= 3:
                         table_id = args[2]
@@ -374,24 +351,19 @@ class PybroUIParser(ast.NodeVisitor):
                     token_type = None
 
                 if token_type is not None:
-                    # Create the node
                     if 'css' in kwargs:
                         attrs['css'] = kwargs['css']
                     if 'class' in kwargs:
                         attrs['class'] = kwargs['class']
                     new_node = UINode(token_type, **attrs)
 
-                    # Structural nodes manage the stack
                     if token_type in ('SECTION_START', 'LAYOUT_ROW_START', 'PAGE_START', 'TAB_START', 'TAB_GROUP_START'):
                         self.stack[-1].children.append(new_node)
                         self.stack.append(new_node)
                     elif token_type in ('SECTION_END', 'LAYOUT_ROW_END', 'PAGE_END', 'TAB_END', 'TAB_GROUP_END'):
-                        # pop the stack, but ensure the end token is matched to its start
                         if len(self.stack) > 1:
-                            # We don't need to create an explicit end node; flatten_tree handles it.
                             self.stack.pop()
                     else:
-                        # Leaf node
                         self.stack[-1].children.append(new_node)
 
         self.generic_visit(node)
@@ -424,7 +396,6 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
                 self.send_response(401); self.end_headers()
                 self.wfile.write(b"Unauthorized: Missing or invalid security session key.")
                 return
-            # Flatten tree under lock, return copy
             with tree_lock:
                 tokens_flat = flatten_tree(UI_ROOT) if UI_ROOT else []
             self.send_response(200)
@@ -514,7 +485,6 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
             with open(html_path, 'rb') as f:
                 html_bytes = f.read()
 
-            # Custom CSS injection
             custom_css_path = getattr(self.server, 'custom_css_path', None)
             if custom_css_path and os.path.isfile(custom_css_path):
                 html_str = html_bytes.decode('utf-8')
@@ -522,7 +492,6 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
                 html_str = html_str.replace('</head>', f'{link_tag}\n</head>')
                 html_bytes = html_str.encode('utf-8')
 
-            # Poll interval injection
             poll_interval = getattr(self.server, 'poll_interval', 2000)
             html_str = html_bytes.decode('utf-8')
             poll_script = f'<script>window.pybroPollInterval = {poll_interval};</script>'
@@ -530,6 +499,7 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
             html_bytes = html_str.encode('utf-8')
 
             self.wfile.write(html_bytes)
+
         # Serve static files (JS, CSS, etc.)
         elif clean_path.startswith('/static/'):
             base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -576,7 +546,6 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
             requested_cmd = post_data.get('cmd')
             target_id = post_data.get('target_id')
 
-            # Validate command (we still check against tokens in the tree)
             with tree_lock:
                 tokens_flat = flatten_tree(UI_ROOT)
             is_valid = any(t.get('cmd') == requested_cmd for t in tokens_flat if t['type'] == 'OS_GATEKEEPER')
@@ -590,7 +559,20 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
 
             timeout = getattr(self.server, 'os_timeout', 5)
             try:
-                result = subprocess.run(requested_cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+                # Security: use shlex.split() and shell=False to avoid injection
+                cmd_list = shlex.split(requested_cmd)
+
+                # Optional allowlist check from pybro.toml
+                allowed_commands = getattr(self.server, 'allowed_commands', None)
+                if allowed_commands is not None and cmd_list and cmd_list[0] not in allowed_commands:
+                    resp = {"output": f"Command '{cmd_list[0]}' is not allowed.", "target_id": target_id}
+                    self.send_response(403)
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps(resp).encode())
+                    return
+
+                result = subprocess.run(cmd_list, capture_output=True, text=True, timeout=timeout)
                 raw_output = result.stdout if result.stdout else result.stderr
                 response_text = html.escape(raw_output).strip()
                 if not response_text:
@@ -600,13 +582,11 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
             except Exception as e:
                 response_text = html.escape(f"Error: {str(e)}")
 
-            # Persist output in the tree if target_id matches a text_area
             if target_id:
                 with tree_lock:
                     node = find_node_by_id(UI_ROOT, target_id)
                     if node and node.type == 'UI_TEXT_AREA':
                         node.attrs['value'] = response_text
-                    # broadcast updated tokens
                     flat = flatten_tree(UI_ROOT)
                 broadcast_event("tokens_updated", json.dumps(flat))
             resp = {"output": response_text, "target_id": target_id}
@@ -626,7 +606,11 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
             if is_registered and TARGET_MODULE and hasattr(TARGET_MODULE, func_name):
                 try:
                     target_function = getattr(TARGET_MODULE, func_name)
-                    result = target_function(form_state)   # execute without lock
+
+                    # Security: capture stdout/stderr during callback execution
+                    with io.StringIO() as buf, redirect_stdout(buf), redirect_stderr(buf):
+                        result = target_function(form_state)
+                    # captured output is silently swallowed
 
                     token_patches = None
                     if isinstance(result, list):
@@ -635,12 +619,10 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
                         token_patches = result['patches']
 
                     if token_patches:
-                        # Apply patches under lock
                         with tree_lock:
                             for patch in token_patches:
                                 action = patch.get('action')
 
-                                # id‑based section toggle
                                 if action == 'toggle_section':
                                     section_id = patch.get('section_id', '')
                                     visible = bool(patch.get('visible', True))
@@ -649,12 +631,10 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
                                         node.attrs['visible'] = visible
                                     continue
 
-                                # target_id or token_index? We'll support target_id
                                 target_id_patch = patch.get('target_id')
                                 if target_id_patch:
                                     node = find_node_by_id(UI_ROOT, target_id_patch)
                                 else:
-                                    # fallback to token_index (deprecated but kept for compatibility)
                                     idx = int(patch.get('token_index', -1))
                                     if idx >= 0:
                                         flat = flatten_tree(UI_ROOT)
@@ -703,7 +683,6 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
             else:
                 response_text = "Error: Function mapping constraint failure."
 
-            # Persist plain‑text output in the tree if target_id is a text_area
             if target_id and not token_patches and response_text != "UI updated":
                 with tree_lock:
                     node = find_node_by_id(UI_ROOT, target_id)
@@ -746,9 +725,7 @@ def watch_script(script_path, connectable=False):
                     spec.loader.exec_module(new_module)
                 except Exception as e:
                     print(f"[!] Warning: could not reload module: {e}")
-                # Link deferred symbols
                 link_tree(new_root, new_module)
-                # Atomically replace tree
                 with tree_lock:
                     UI_ROOT = new_root
                     TARGET_MODULE = new_module
@@ -793,7 +770,6 @@ def main():
     parser.add_argument("--custom-css", default=None, help="Path to a CSS file to override default styles")
     args = parser.parse_args()
 
-    # --- Determine project directory and read pybro.toml ---
     if args.script and args.script != '.':
         script_path_arg = os.path.abspath(args.script)
         PROJECT_DIR = os.path.dirname(script_path_arg)
@@ -837,6 +813,9 @@ def main():
     connect_target = get_value('connect', args.connect, None)
     poll_interval = get_value('poll-interval', None, 2000, int)
 
+    # Security: read allowed commands from pybro.toml (optional)
+    allowed_commands = config.get('allowed_commands', None)
+
     if custom_css and not os.path.isfile(custom_css):
         print(f"[!] Custom CSS file not found: {custom_css}")
         sys.exit(1)
@@ -857,13 +836,13 @@ def main():
         script_path = os.path.join(PROJECT_DIR, main_candidate)
     else:
         script_path = None
-        
+
     # --- MODE 2: Distributed Sandbox Client ---
     if connect_target:
         if not connect_target.startswith("http"):
             connect_target = f"http://{connect_target}"
         print(f"[*] Mode 2: Launching distributed sandbox link to pipeline: {connect_target}")
-    
+
         headers = {}
         if key:
             headers["X-Pybro-Key"] = key
@@ -874,8 +853,7 @@ def main():
                 key = extracted_key
             except Exception:
                 pass
-    
-        # Fetch flat token list (only needed for compatibility check)
+
         try:
             req = urllib.request.Request(f"{connect_target.split('?')[0].rstrip('/')}/tokens", headers=headers)
             with urllib.request.urlopen(req, timeout=5) as response:
@@ -885,8 +863,7 @@ def main():
             print(f"[-] Failed to fetch tokens: {e}")
             traceback.print_exc()
             sys.exit(1)
-    
-        # Fetch full token tree (code + UI tokens)
+
         try:
             req = urllib.request.Request(f"{connect_target.split('?')[0].rstrip('/')}/token-tree", headers=headers)
             with urllib.request.urlopen(req, timeout=10) as response:
@@ -921,8 +898,7 @@ def main():
             print(f"[-] Failed to fetch or verify token tree: {e}")
             traceback.print_exc()
             sys.exit(1)
-    
-        # Reconstruct a UI tree from the flat tokens
+
         def build_tree_from_flat(tokens):
             root = UINode('ROOT')
             stack = [root]
@@ -944,19 +920,14 @@ def main():
                     expected_type = end_map[ttype]
                     if stack[-1].type == expected_type:
                         stack.pop()
-                    else:
-                        # mismatch, but we can still pop if we find it
-                        # For simplicity we assume well‑formed tokens
-                        pass
                 else:
                     node = UINode(ttype, **attrs)
                     stack[-1].children.append(node)
             return root
-    
+
         with tree_lock:
             UI_ROOT = build_tree_from_flat(ui_tokens)
-    
-        # Extract the codebase to temp directory
+
         TEMP_DIR = tempfile.mkdtemp(prefix='pybro_')
         for rel_path, content in files.items():
             dest_path = os.path.join(TEMP_DIR, rel_path)
@@ -964,13 +935,11 @@ def main():
             with open(dest_path, 'w', encoding='utf-8') as f:
                 f.write(content)
         print(f"[+] Codebase extracted to {TEMP_DIR}")
-    
+
         if TEMP_DIR not in sys.path:
             sys.path.insert(0, TEMP_DIR)
-    
-        # Install dependencies if needed
+
         if requires and allow_deps:
-            # (dependency installation unchanged – keep the previous code)
             print("[*] Installing external dependencies...")
             venv_dir = os.path.join(TEMP_DIR, '.venv')
             try:
@@ -978,19 +947,18 @@ def main():
             except subprocess.CalledProcessError as e:
                 print(f"[!] Failed to create virtual environment: {e.stderr.decode()}")
                 sys.exit(1)
-    
+
             pip_path = os.path.join(venv_dir, 'Scripts' if os.name == 'nt' else 'bin', 'pip')
             py_path = os.path.join(venv_dir, 'Scripts' if os.name == 'nt' else 'bin', 'python')
             env = os.environ.copy()
             env['PIP_CACHE_DIR'] = os.path.join(TEMP_DIR, 'pip_cache')
-    
+
             for dep in requires:
                 print(f"  - Installing {dep}")
                 try:
                     subprocess.run([pip_path, 'install', dep], check=True, capture_output=True, text=True, env=env)
                 except subprocess.CalledProcessError as e:
                     print(f"[!] Failed to install {dep}: {e.stderr}")
-            # Add venv to path
             try:
                 result = subprocess.run([py_path, '-c', "import site; print(';'.join(site.getsitepackages()))"],
                                         capture_output=True, text=True, env=env)
@@ -1004,8 +972,7 @@ def main():
                 if os.path.isdir(lib_path) and lib_path not in sys.path:
                     sys.path.append(lib_path)
             print("[+] Dependencies installed.")
-    
-        # Locate and import the main module
+
         if entrypoint:
             main_script = entrypoint
         else:
@@ -1014,7 +981,7 @@ def main():
             if not main_script:
                 print("[!] No Python files found in the downloaded bundle.")
                 sys.exit(1)
-    
+
         module_name = os.path.splitext(main_script)[0]
         spec = importlib.util.spec_from_file_location(module_name, os.path.join(TEMP_DIR, main_script))
         TARGET_MODULE = importlib.util.module_from_spec(spec)
@@ -1024,9 +991,8 @@ def main():
         except Exception as e:
             print(f"[!] Warning: could not execute module: {e}")
             traceback.print_exc()
-    
+
         bind_ip = "127.0.0.1"
-        
     else:
         # --- DEFAULT MODE & MODE 1 (Master) ---
         if not script_path:
@@ -1036,14 +1002,12 @@ def main():
         if PROJECT_DIR not in sys.path:
             sys.path.insert(0, PROJECT_DIR)
 
-        # Parse the script and build the tree
         with open(script_path, "r") as f:
             ast_tree = ast.parse(f.read())
         parser_obj = PybroUIParser()
         parser_obj.visit(ast_tree)
         UI_ROOT = parser_obj.root
 
-        # Load the module (callbacks only, no execution during parsing)
         module_name = os.path.splitext(os.path.basename(script_path))[0]
         spec = importlib.util.spec_from_file_location(module_name, script_path)
         TARGET_MODULE = importlib.util.module_from_spec(spec)
@@ -1053,10 +1017,8 @@ def main():
             print(f"[!] Target callback module linking unavailable: {e}")
             traceback.print_exc()
 
-        # Now resolve all deferred symbol references
         link_tree(UI_ROOT, TARGET_MODULE)
 
-        # Setup network
         if shared:
             bind_ip = "0.0.0.0"
             SESSION_KEY = key if key else secrets.token_hex(4)
@@ -1074,7 +1036,6 @@ def main():
                 print("[!] --connectable requires a shared key. Use --shared --key <secret>.")
                 sys.exit(1)
 
-    # --- Cleanup of temporary dir ---
     if TEMP_DIR and not keep_script:
         def cleanup_temp_dir():
             if os.path.exists(TEMP_DIR):
@@ -1082,13 +1043,47 @@ def main():
                 print(f"[-] Temporary codebase {TEMP_DIR} deleted.")
         atexit.register(cleanup_temp_dir)
 
-    # --- SSL setup (unchanged) ---
     ssl_context = None
     cert_file_temp = None
     key_file_temp = None
     if ssl_enabled:
-        # ... same as before ...
-        pass
+        if cert_file and key_file:
+            if not os.path.exists(cert_file):
+                print(f"[!] Certificate file not found: {cert_file}")
+                sys.exit(1)
+            if not os.path.exists(key_file):
+                print(f"[!] Key file not found: {key_file}")
+                sys.exit(1)
+            ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            try:
+                ssl_context.load_cert_chain(cert_file, key_file)
+                print("[*] Using provided TLS certificate.")
+            except Exception as e:
+                print(f"[!] Failed to load certificate/key: {e}")
+                sys.exit(1)
+        else:
+            if sys.version_info < (3, 9):
+                print("[!] --ssl requires Python 3.9 or later for automatic certificate generation.")
+                print("[!] Provide your own certificate with --cert-file and --key-file.")
+                sys.exit(1)
+            if not hasattr(ssl.SSLContext, 'generate_self_signed_certificate'):
+                print("[!] Your Python installation does not support automatic self‑signed certificates.")
+                sys.exit(1)
+            try:
+                ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                cert_pem, key_pem = ssl_context.generate_self_signed_certificate(("localhost",), valid_days=365)
+                cert_file_temp = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.pem')
+                cert_file_temp.write(cert_pem)
+                cert_file_temp.close()
+                key_file_temp = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.pem')
+                key_file_temp.write(key_pem)
+                key_file_temp.close()
+                ssl_context.load_cert_chain(cert_file_temp.name, key_file_temp.name)
+                fingerprint = hashlib.sha256(ssl.PEM_cert_to_DER_cert(cert_pem)).hexdigest()
+                print(f"[*] Self‑signed certificate SHA256 fingerprint: {fingerprint}")
+            except Exception as e:
+                print(f"[!] Failed to generate SSL certificate: {e}")
+                sys.exit(1)
 
     class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         allow_reuse_address = True
@@ -1099,6 +1094,7 @@ def main():
             httpd.verbose = verbose
             httpd.os_timeout = os_timeout
             httpd.poll_interval = poll_interval
+            httpd.allowed_commands = allowed_commands   # store allowlist on server instance
             if custom_css:
                 httpd.custom_css_path = os.path.abspath(custom_css)
 
