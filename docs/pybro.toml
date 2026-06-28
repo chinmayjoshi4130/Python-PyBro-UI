@@ -1,0 +1,75 @@
+# Pybro Project Configuration
+# ============================
+# Place this file in your project root.
+# All settings are optional – omitted values use the defaults below.
+# CLI flags override these values when passed explicitly.
+
+# ----------------------------------------------------------------------
+# Engine settings
+# ----------------------------------------------------------------------
+[pybro]
+
+# Main Python file to run (default: first .py file found, or main.py)
+# Only needed if you want to explicitly set the entry point.
+# entry-point = "main.py"
+
+# Server port (default: 8080)
+# port = 8080
+
+# Bind to all interfaces (default: false – binds to 127.0.0.1)
+# shared = false
+
+# Security key for shared mode; if absent, a random hex key is generated.
+# key = "my-secret-key"
+
+# Allow remote clients to download the signed project tree (only meaningful with shared = true)
+# connectable = false
+
+# Watch the main script for changes and auto-reload tokens (default: false)
+# watch = false
+
+# Enable HTTPS (default: false)
+# ssl = false
+
+# Path to TLS certificate file (PEM) – required if ssl = true and no auto-generation
+# cert-file = "/path/to/cert.pem"
+
+# Path to TLS private key file (PEM) – required if ssl = true and no auto-generation
+# key-file = "/path/to/key.pem"
+
+# Timeout (seconds) for OS commands (default: 5)
+# os-timeout = 5
+
+# Custom CSS file loaded after the built‑in styles (overrides defaults)
+# custom-css = "my_theme.css"
+
+# Polling interval (milliseconds) for token change detection fallback (default: 2000)
+# poll-interval = 2000
+
+# Remote master address for Mode 2 (distributed sandbox client)
+# connect = "192.168.1.45:8080"
+
+# In Mode 2, install dependencies listed in [distribute] into a temporary venv (default: false)
+# allow-deps = false
+
+# In Mode 2, keep the downloaded temporary codebase after exit (default: false)
+# keep-script = false
+
+# Enable Apache‑style HTTP request logs (default: false)
+# verbose = false
+
+# (Mode 2) Explicit main script filename inside the downloaded bundle (default: auto‑detect)
+# entrypoint = "main.py"
+
+# ----------------------------------------------------------------------
+# Distribution settings (used for bundling / Mode 2)
+# ----------------------------------------------------------------------
+[distribute]
+
+# Files or directories to include in the distributed bundle.
+# If not set, all .py files (excluding .git, __pycache__, venv, etc.) are collected automatically.
+# include = ["main.py", "scanner/", "utils.py"]
+
+# Pip dependencies required by the project.
+# Example: requires = ["requests>=2.25", "rich"]
+# requires = []

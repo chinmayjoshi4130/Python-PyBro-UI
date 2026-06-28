@@ -1,3 +1,5 @@
+---
+
 Pybro gives you multiple layers of CSS control, ranging from quick one‑line overrides to a full custom stylesheet. You can also change the UI dynamically at runtime via token patches. Here’s exactly what you can do, and what the limits are.
 
 ---
@@ -67,7 +69,7 @@ Then, in your custom CSS file (loaded with --custom-css), you define:
 }
 ```
 
-This approach keeps your Python script clean and your styles reusable.
+This approach keeps your Python script clean and your styles reusable. You can also target inner elements (like the terminal inside an OS command block, or table cells) using wrapper classes and descendant selectors – see the Token Reference for the exact DOM structure of each token.
 
 ---
 
@@ -129,10 +131,12 @@ The UI re‑renders instantly, applying the new styles without a page reload.
 
 You have full control over the layout and content via tokens:
 
-· Pages & tabs – multi‑page dashboards with local tab bars using ui.page_start, ui.tab_group_start, etc.
+· Pages – separate, navigable screens with ui.page_start("Name") / ui.page_end().
+· Tabs – local tab bars inside a page, using ui.tab_group_start() / ui.tab_end() and ui.tab_start("Name") / ui.tab_end().
+· Sections – hideable blocks of tokens defined with ui.section_start("id", visible=True/False) and ui.section_end(). These preserve their internal form state when hidden because only display is toggled. You can show/hide them dynamically with the set_section_visible patch action.
 · Rows – horizontal flex rows with ui.row_start / ui.row_end.
 · Widgets – the complete catalogue of inputs, outputs, tables, math blocks, and buttons.
-· Dynamic content – tables can be updated, dropdown options changed, titles rewritten, all from Python callbacks.
+· Dynamic content – tables can be updated, dropdown options changed, titles rewritten, sections shown/hidden, all from Python callbacks.
 
 You cannot currently add custom HTML elements or JavaScript (that’s planned, but with security gates). The available widget set covers most automation needs.
 
@@ -143,10 +147,11 @@ Summary of control levels
 What you want to change How to do it
 Colours, radii, shadows globally ui.root_css({...})
 One widget’s style inline css={"property":"value"}
-Reusable style patterns class_="my-class" + --custom-css
+Reusable style patterns (including inner elements) class_="my-class" + --custom-css
 Entire theme / layout overhaul --custom-css your_file.css
 Change styles at runtime Token patches (set_css, set_class)
-Change UI content at runtime Token patches (set_text, insert_table_row, etc.)
+Change UI content at runtime Token patches (set_text, insert_table_row, set_options, set_section_visible, etc.)
 Add custom HTML/JS Not yet available (planned)
+Show/hide predefined blocks without destroying state ui.section_start / ui.section_end + patches
 
-In practice, most dashboards need only root_css and a few inline css tweaks. If you need a branded look or specific layout, a custom stylesheet gives you nearly limitless visual freedom.
+In practice, most dashboards need only root_css and a few inline css tweaks. If you need a branded look or specific layout, a custom stylesheet gives you nearly limitless visual freedom, and sections let you build interactive, conditional interfaces.

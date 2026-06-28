@@ -1,0 +1,10 @@
+[pybro]
+# Project configuration – all values are optional (defaults used otherwise)
+entry-point = "main.py"
+port = 8080
+watch = true
+custom-css = "theme.css"
+
+[distribute]
+# Files to bundle when using --connectable / Mode 2
+include = ["main.py", "scanner.py", "theme.css", "pybro.toml"]

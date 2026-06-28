@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Pybro Dashboard</title>
     <style>
-        /* --- all styles unchanged (as in previous full version) --- */
         :root {
             --bg: #0b0f19;
             --surface: #131a2b;
@@ -369,14 +368,12 @@
                 pageDiv.className = 'page-content';
                 pageDiv.id = 'page-' + page.name.replace(/\s/g, '_');
 
-                // Page-level tokens first
                 if (page.tokens.length > 0) {
                     const pageTokensDiv = document.createElement('div');
                     renderTokens(pageTokensDiv, page.tokens);
                     pageDiv.appendChild(pageTokensDiv);
                 }
 
-                // Tabs below
                 if (page.tabs && page.tabs.length > 0) {
                     const tabBar = document.createElement('div');
                     tabBar.className = 'tab-bar';
@@ -449,81 +446,90 @@
         function renderTokens(container, tokens) {
             globalMathFormulas = [];
             callbackButtons = {};
-            let currentContainer = container;
+            let containers = [container];
 
             tokens.forEach(tok => {
-                if (tok.type === 'LAYOUT_ROW_START') {
-                    const row = document.createElement('div'); row.className = "ui-row";
+                if (tok.type === 'SECTION_START') {
+                    const sectionDiv = document.createElement('div');
+                    sectionDiv.className = 'section';
+                    sectionDiv.id = 'section-' + tok.id;
+                    if (!tok.visible) sectionDiv.style.display = 'none';
+                    applyComponentCSS(sectionDiv, tok);
+                    containers[containers.length - 1].appendChild(sectionDiv);
+                    containers.push(sectionDiv);
+                } else if (tok.type === 'SECTION_END') {
+                    if (containers.length > 1) containers.pop();
+                } else if (tok.type === 'LAYOUT_ROW_START') {
+                    const row = document.createElement('div');
+                    row.className = "ui-row";
                     applyComponentCSS(row, tok);
-                    container.appendChild(row);
-                    currentContainer = row;
+                    containers[containers.length - 1].appendChild(row);
+                    containers.push(row);
+                } else if (tok.type === 'LAYOUT_ROW_END') {
+                    if (containers.length > 1) containers.pop();
+                } else if (tok.type === 'UI_ROOT_CSS') {
                     return;
-                }
-                if (tok.type === 'LAYOUT_ROW_END') {
-                    currentContainer = container;
-                    return;
-                }
-                if (tok.type === 'UI_ROOT_CSS') return;
+                } else {
+                    const wrapper = document.createElement('div');
+                    wrapper.className = "component";
+                    applyComponentCSS(wrapper, tok);
 
-                const wrapper = document.createElement('div');
-                wrapper.className = "component";
-                applyComponentCSS(wrapper, tok);
-
-                switch(tok.type) {
-                    case "UI_TITLE":
-                        const h = document.createElement('h1');
-                        h.innerText = tok.text;
-                        if (tok.css) { for (const [p,v] of Object.entries(tok.css)) h.style.setProperty(p,v); }
-                        if (tok.class) h.classList.add(tok.class);
-                        currentContainer.appendChild(h);
-                        return;
-                    case "UI_INPUT":
-                        wrapper.innerHTML += `<label>${tok.label}</label><input id="${tok.id}" type="text" oninput="evaluateReactiveMath(); debouncedSyncFormState()">`;
-                        break;
-                    case "UI_CHECKBOX":
-                        wrapper.innerHTML += `<label style="display:flex; align-items:center; gap:8px;"><input id="${tok.id}" type="checkbox" onchange="evaluateReactiveMath(); debouncedSyncFormState()"> ${tok.label}</label>`;
-                        break;
-                    case "UI_DROPDOWN":
-                        const optionsHTML = tok.options.map(o => `<option value="${o}">${o}</option>`).join('');
-                        wrapper.innerHTML += `<label>${tok.label}</label><select id="${tok.id}" onchange="evaluateReactiveMath(); debouncedSyncFormState()">${optionsHTML}</select>`;
-                        break;
-                    case "UI_TEXT_AREA":
-                        wrapper.innerHTML += `<label>${tok.label}</label><textarea id="${tok.id}" readonly>System Idle...</textarea>`;
-                        break;
-                    case "UI_CALLBACK_BUTTON":
-                        callbackButtons[tok.callback_name] = tok.target_id || null;
-                        wrapper.innerHTML += `<button type="button" data-callback="${tok.callback_name}">${tok.text}</button>`;
-                        break;
-                    case "UI_MATH_COMPUTE":
-                        globalMathFormulas.push(tok);
-                        return;
-                    case "OS_GATEKEEPER":
-                        wrapper.innerHTML += `
-                            <button type="button" data-os-cmd="${encodeURIComponent(tok.cmd)}" data-os-desc="${encodeURIComponent(tok.desc)}" data-os-target="${tok.target_id}">Execute Script Hook</button>
-                            <label style="margin-top:10px;">System Buffer Output:</label>
-                            <div id="${tok.target_id}" class="terminal">Console idle.</div>`;
-                        break;
-                    case "UI_TABLE":
-                        let tableHtml = '';
-                        const headers = tok.headers || [];
-                        const rows = tok.rows || [];
-                        if (headers.length === 0 && rows.length === 0) {
-                            tableHtml = '<p style="padding:1rem;">No data available.</p>';
-                        } else {
-                            const ths = headers.map(h => `<th>${h}</th>`).join('');
-                            const trs = rows.map(r => {
-                                const cells = [];
-                                for (let i = 0; i < headers.length; i++) {
-                                    cells.push(`<td>${r[i] !== undefined ? r[i] : ''}</td>`);
-                                }
-                                return `<tr>${cells.join('')}</tr>`;
-                            }).join('');
-                            tableHtml = `<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
-                        }
-                        wrapper.innerHTML += tableHtml;
-                        break;
+                    switch(tok.type) {
+                        case "UI_TITLE":
+                            const h = document.createElement('h1');
+                            h.innerText = tok.text;
+                            if (tok.css) { for (const [p,v] of Object.entries(tok.css)) h.style.setProperty(p,v); }
+                            if (tok.class) h.classList.add(tok.class);
+                            containers[containers.length - 1].appendChild(h);
+                            return;
+                        case "UI_INPUT":
+                            wrapper.innerHTML += `<label>${tok.label}</label><input id="${tok.id}" type="text" oninput="evaluateReactiveMath(); debouncedSyncFormState()">`;
+                            break;
+                        case "UI_CHECKBOX":
+                            wrapper.innerHTML += `<label style="display:flex; align-items:center; gap:8px;"><input id="${tok.id}" type="checkbox" onchange="evaluateReactiveMath(); debouncedSyncFormState()"> ${tok.label}</label>`;
+                            break;
+                        case "UI_DROPDOWN":
+                            const optionsHTML = tok.options.map(o => `<option value="${o}">${o}</option>`).join('');
+                            wrapper.innerHTML += `<label>${tok.label}</label><select id="${tok.id}" onchange="evaluateReactiveMath(); debouncedSyncFormState()">${optionsHTML}</select>`;
+                            break;
+                        case "UI_TEXT_AREA":
+                            wrapper.innerHTML += `<label>${tok.label}</label><textarea id="${tok.id}" readonly>System Idle...</textarea>`;
+                            break;
+                        case "UI_CALLBACK_BUTTON":
+                            callbackButtons[tok.callback_name] = tok.target_id || null;
+                            wrapper.innerHTML += `<button type="button" data-callback="${tok.callback_name}">${tok.text}</button>`;
+                            break;
+                        case "UI_MATH_COMPUTE":
+                            globalMathFormulas.push(tok);
+                            return;
+                        case "OS_GATEKEEPER":
+                            wrapper.innerHTML += `
+                                <button type="button" data-os-cmd="${encodeURIComponent(tok.cmd)}" data-os-desc="${encodeURIComponent(tok.desc)}" data-os-target="${tok.target_id}">Execute Script Hook</button>
+                                <label style="margin-top:10px;">System Buffer Output:</label>
+                                <div id="${tok.target_id}" class="terminal">Console idle.</div>`;
+                            break;
+                        case "UI_TABLE":
+                            let tableHtml = '';
+                            const headers = tok.headers || [];
+                            const rows = tok.rows || [];
+                            if (headers.length === 0 && rows.length === 0) {
+                                tableHtml = '<p style="padding:1rem;">No data available.</p>';
+                            } else {
+                                const ths = headers.map(h => `<th>${h}</th>`).join('');
+                                const trs = rows.map(r => {
+                                    const cells = [];
+                                    for (let i = 0; i < headers.length; i++) {
+                                        cells.push(`<td>${r[i] !== undefined ? r[i] : ''}</td>`);
+                                    }
+                                    return `<tr>${cells.join('')}</tr>`;
+                                }).join('');
+                                tableHtml = `<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
+                            }
+                            wrapper.innerHTML += tableHtml;
+                            break;
+                    }
+                    containers[containers.length - 1].appendChild(wrapper);
                 }
-                currentContainer.appendChild(wrapper);
             });
         }
 
@@ -594,7 +600,6 @@
             }
         }
 
-        // --- Blocking OS execution (no streaming) ---
         async function resolveGatekeeper(allowed) {
             document.getElementById('gatekeeper-modal').style.display = 'none';
             if (!allowed || !pendingCommand) return;
@@ -665,6 +670,8 @@
         }
 
         function startPolling() {
+            // Read poll interval injected by server (default 2000 ms)
+            const pollMs = parseInt(window.pybroPollInterval) || 2000;
             setInterval(async () => {
                 try {
                     const res = await fetch('/tokens' + window.location.search, { headers: getAuthHeaders() });
@@ -677,7 +684,7 @@
                         initRuntime();
                     }
                 } catch (e) {}
-            }, 2000);
+            }, pollMs);
         }
 
         window.onload = () => {

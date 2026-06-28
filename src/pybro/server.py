@@ -139,17 +139,11 @@ def build_token_tree():
 
 # ---------- AST Parser ----------
 class PybroUIParser(ast.NodeVisitor):
-    """
-    Walk the user script and extract UI tokens into COMPILED_TOKENS.
-    If a module is provided, function calls in assignments are evaluated
-    and their return values stored in the variable table.
-    """
     def __init__(self, module=None):
         self.var_table = {}
         self.module = module
 
     def _safe_eval(self, node):
-        """Evaluate an AST expression node safely, using the module's namespace if available."""
         if isinstance(node, ast.Constant):
             return node.value
         if isinstance(node, ast.Name):
@@ -165,7 +159,6 @@ class PybroUIParser(ast.NodeVisitor):
                 if self.module and hasattr(self.module, func_name):
                     func = getattr(self.module, func_name)
             elif isinstance(node.func, ast.Attribute):
-                # For module.func() style, not implemented here but could be added
                 pass
             if callable(func):
                 args = [self._safe_eval(a) for a in node.args]
@@ -180,7 +173,6 @@ class PybroUIParser(ast.NodeVisitor):
             return None
 
     def visit_Module(self, node):
-        # First pass: collect assignments with callable values
         for stmt in node.body:
             if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
                 target = stmt.targets[0]
@@ -226,11 +218,20 @@ class PybroUIParser(ast.NodeVisitor):
                             kwargs['target_id'] = ast.literal_eval(kw.value)
                         except Exception:
                             kwargs['target_id'] = None
+                    elif kw.arg == 'visible':
+                        try:
+                            kwargs['visible'] = ast.literal_eval(kw.value)
+                        except Exception:
+                            kwargs['visible'] = True
 
                 token = None
 
-                # --- new structural tokens ---
-                if func_name == 'page_start' and args:
+                # --- structural tokens ---
+                if func_name == 'section_start' and args:
+                    token = {"type": "SECTION_START", "id": args[0], "visible": kwargs.get("visible", True)}
+                elif func_name == 'section_end':
+                    token = {"type": "SECTION_END"}
+                elif func_name == 'page_start' and args:
                     token = {"type": "PAGE_START", "name": args[0]}
                 elif func_name == 'page_end':
                     token = {"type": "PAGE_END"}
@@ -243,7 +244,7 @@ class PybroUIParser(ast.NodeVisitor):
                 elif func_name == 'tab_group_end':
                     token = {"type": "TAB_GROUP_END"}
 
-                # --- original tokens unchanged ---
+                # --- original visual tokens ---
                 elif func_name == 'title' and args:
                     token = {"type": "UI_TITLE", "text": args[0]}
                 elif func_name == 'row_start':
@@ -377,7 +378,6 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(PROJECT_TOKEN_TREE).encode())
 
-        # --- Serve custom CSS ---
         elif clean_path == '/custom.css':
             custom_css_path = getattr(self.server, 'custom_css_path', None)
             if custom_css_path and os.path.isfile(custom_css_path):
@@ -398,13 +398,20 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
             with open(html_path, 'rb') as f:
                 html_bytes = f.read()
 
-            # Inject custom CSS link if path is set
+            # Custom CSS injection
             custom_css_path = getattr(self.server, 'custom_css_path', None)
             if custom_css_path and os.path.isfile(custom_css_path):
                 html_str = html_bytes.decode('utf-8')
                 link_tag = '<link rel="stylesheet" href="/custom.css">'
                 html_str = html_str.replace('</head>', f'{link_tag}\n</head>')
                 html_bytes = html_str.encode('utf-8')
+
+            # Poll interval injection
+            poll_interval = getattr(self.server, 'poll_interval', 2000)
+            html_str = html_bytes.decode('utf-8')
+            poll_script = f'<script>window.pybroPollInterval = {poll_interval};</script>'
+            html_str = html_str.replace('</body>', f'{poll_script}\n</body>')
+            html_bytes = html_str.encode('utf-8')
 
             self.wfile.write(html_bytes)
         else:
@@ -486,10 +493,23 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
                         try:
                             for patch in token_patches:
                                 action = patch.get('action')
+
+                                # --- id‑based section toggle ---
+                                if action == 'toggle_section':
+                                    section_id = patch.get('section_id', '')
+                                    visible = bool(patch.get('visible', True))
+                                    for t in COMPILED_TOKENS:
+                                        if t.get('type') == 'SECTION_START' and t.get('id') == section_id:
+                                            t['visible'] = visible
+                                            break
+                                    continue
+
+                                # --- index‑based actions ---
                                 idx = int(patch.get('token_index', -1))
                                 if idx < 0 or idx >= len(COMPILED_TOKENS):
                                     continue
                                 token = COMPILED_TOKENS[idx]
+
                                 if action == 'set_text':
                                     token['text'] = str(patch.get('value', ''))
                                 elif action == 'set_label':
@@ -534,7 +554,6 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
 
 
 def watch_script(script_path):
-    """Poll the script file for changes and re‑compile tokens."""
     global COMPILED_TOKENS, TARGET_MODULE, PROJECT_TOKEN_TREE
     last_mtime = os.path.getmtime(script_path)
     while True:
@@ -548,7 +567,6 @@ def watch_script(script_path):
                 COMPILED_TOKENS = []
                 parser_obj = PybroUIParser(module=TARGET_MODULE)
                 parser_obj.visit(ast_tree)
-                # Re-import the module so callbacks are updated
                 module_name = os.path.splitext(os.path.basename(script_path))[0]
                 spec = importlib.util.spec_from_file_location(module_name, script_path)
                 TARGET_MODULE = importlib.util.module_from_spec(spec)
@@ -573,53 +591,120 @@ def main():
     global COMPILED_TOKENS, TARGET_MODULE, SESSION_KEY, TEMP_DIR, PROJECT_DIR, PROJECT_TOKEN_TREE
 
     parser = argparse.ArgumentParser(description="Pybro Engine Runtime Framework")
-    parser.add_argument("script", nargs="?", help="Target python automation script to compile")
-    parser.add_argument("--shared", action="store_true", help="Mode 1: Shared Team Mode (exposes to LAN with security key)")
-    parser.add_argument("--key", help="Specify a custom security key string")
-    parser.add_argument("--connect", help="Mode 2: Remote Client Mirror (pulls blueprints from remote target IP:port)")
-    parser.add_argument("--connectable", action="store_true",
-                        help="When in shared mode, allow Mode 2 clients to download the signed project tree")
-    parser.add_argument("--keep-script", action="store_true",
-                        help="In Mode 2, keep the downloaded temporary codebase after exit")
-    parser.add_argument("--port", type=int, default=8080, help="Server port (default 8080)")
-    parser.add_argument("--verbose", action="store_true", help="Enable HTTP request logging")
-    parser.add_argument("--ssl", action="store_true",
+    parser.add_argument("script", nargs="?", default=None, help="Target python automation script to compile")
+    parser.add_argument("--shared", action="store_true", default=None, help="Shared Team Mode")
+    parser.add_argument("--key", default=None, help="Custom security key string")
+    parser.add_argument("--connect", default=None, help="Remote Client Mirror target (IP:port)")
+    parser.add_argument("--connectable", action="store_true", default=None,
+                        help="Allow remote clients to download signed token tree")
+    parser.add_argument("--keep-script", action="store_true", default=None,
+                        help="Keep downloaded temp codebase after exit")
+    parser.add_argument("--port", type=int, default=None, help="Server port (default 8080)")
+    parser.add_argument("--verbose", action="store_true", default=None, help="HTTP request logging")
+    parser.add_argument("--ssl", action="store_true", default=None,
                         help="Serve over HTTPS (requires --cert-file/--key-file or auto‑generation)")
-    parser.add_argument("--cert-file", help="Path to TLS certificate file (PEM) for --ssl")
-    parser.add_argument("--key-file", help="Path to TLS private key file (PEM) for --ssl")
-    parser.add_argument("--allow-deps", action="store_true",
-                        help="In Mode 2, install external dependencies listed in the project's pybro.toml into a temporary venv")
-    parser.add_argument("--entrypoint", help="Name of the main Python file in Mode 2 (default: main.py or first .py found)")
-    parser.add_argument("--os-timeout", type=int, default=5, help="Timeout in seconds for OS commands (default 5)")
-    parser.add_argument("--watch", action="store_true", help="Watch the script file for changes and auto‑reload tokens (master mode only)")
-    parser.add_argument("--custom-css", help="Path to a CSS file to override default styles")
+    parser.add_argument("--cert-file", default=None, help="TLS certificate file (PEM)")
+    parser.add_argument("--key-file", default=None, help="TLS private key file (PEM)")
+    parser.add_argument("--allow-deps", action="store_true", default=None,
+                        help="Install dependencies from pybro.toml")
+    parser.add_argument("--entrypoint", default=None, help="Main Python file in Mode 2")
+    parser.add_argument("--os-timeout", type=int, default=None, help="Timeout for OS commands (default 5)")
+    parser.add_argument("--watch", action="store_true", default=None,
+                        help="Watch script for changes and auto‑reload tokens")
+    parser.add_argument("--custom-css", default=None, help="Path to a CSS file to override default styles")
     args = parser.parse_args()
 
-    port = args.port
+    # --- Determine project directory and read pybro.toml ---
+    if args.script and args.script != '.':
+        script_path_arg = os.path.abspath(args.script)
+        PROJECT_DIR = os.path.dirname(script_path_arg)
+    else:
+        PROJECT_DIR = os.getcwd()
 
-    # Validate custom CSS path
-    if args.custom_css and not os.path.isfile(args.custom_css):
-        print(f"[!] Custom CSS file not found: {args.custom_css}")
+    config = {}
+    toml_path = os.path.join(PROJECT_DIR, 'pybro.toml')
+    if os.path.isfile(toml_path):
+        try:
+            with open(toml_path, 'rb') as f:
+                raw = tomllib.load(f)
+            config = raw.get('pybro', {})
+            # Resolve relative paths in config
+            for path_key in ('custom-css', 'cert-file', 'key-file', 'entrypoint'):
+                if path_key in config and not os.path.isabs(config[path_key]):
+                    config[path_key] = os.path.join(PROJECT_DIR, config[path_key])
+        except Exception:
+            print("[!] Could not parse pybro.toml, ignoring.")
+
+    # Helper: CLI value if given, else config, else default
+    def get_value(key, cli_value, default, coerce=lambda x: x):
+        if cli_value is not None:
+            return cli_value
+        if key in config:
+            return coerce(config[key])
+        return default
+
+    # Resolve all settings
+    shared = get_value('shared', args.shared, False, bool)
+    watch = get_value('watch', args.watch, False, bool)
+    connectable = get_value('connectable', args.connectable, False, bool)
+    ssl_enabled = get_value('ssl', args.ssl, False, bool)
+    allow_deps = get_value('allow-deps', args.allow_deps, False, bool)
+    keep_script = get_value('keep-script', args.keep_script, False, bool)
+    verbose = get_value('verbose', args.verbose, False, bool)
+    key = get_value('key', args.key, None)
+    port = get_value('port', args.port, 8080, int)
+    os_timeout = get_value('os-timeout', args.os_timeout, 5, int)
+    custom_css = get_value('custom-css', args.custom_css, None)
+    cert_file = get_value('cert-file', args.cert_file, None)
+    key_file = get_value('key-file', args.key_file, None)
+    entrypoint = get_value('entrypoint', args.entrypoint, None)
+    connect_target = get_value('connect', args.connect, None)
+    poll_interval = get_value('poll-interval', None, 2000, int)
+
+    # Validate custom CSS
+    if custom_css and not os.path.isfile(custom_css):
+        print(f"[!] Custom CSS file not found: {custom_css}")
         sys.exit(1)
 
+    # --- Determine entry point ---
+    if args.script and args.script != '.':
+        script_path = script_path_arg
+    elif entrypoint:
+        script_path = os.path.join(PROJECT_DIR, entrypoint)
+        if not os.path.isfile(script_path):
+            print(f"[!] Entry point '{entrypoint}' not found.")
+            sys.exit(1)
+    elif connect_target is None:
+        # Auto-discover in PROJECT_DIR
+        py_files = [f for f in os.listdir(PROJECT_DIR) if f.endswith('.py')]
+        main_candidate = next((f for f in py_files if f == 'main.py'), py_files[0] if py_files else None)
+        if not main_candidate:
+            print("[!] No Python files found in project directory.")
+            sys.exit(1)
+        script_path = os.path.join(PROJECT_DIR, main_candidate)
+    else:
+        # Mode 2 – no local script needed
+        script_path = None
+
     # --- MODE 2: Distributed Sandbox Client ---
-    if args.connect:
-        remote_target = args.connect if args.connect.startswith("http") else f"http://{args.connect}"
-        print(f"[*] Mode 2: Launching distributed sandbox link to pipeline: {remote_target}")
+    if connect_target:
+        if not connect_target.startswith("http"):
+            connect_target = f"http://{connect_target}"
+        print(f"[*] Mode 2: Launching distributed sandbox link to pipeline: {connect_target}")
 
         headers = {}
-        if args.key:
-            headers["X-Pybro-Key"] = args.key
-        elif "key=" in remote_target:
+        if key:
+            headers["X-Pybro-Key"] = key
+        elif "key=" in connect_target:
             try:
-                extracted_key = remote_target.split("key=")[1].split("&")[0]
+                extracted_key = connect_target.split("key=")[1].split("&")[0]
                 headers["X-Pybro-Key"] = extracted_key
-                args.key = extracted_key
+                key = extracted_key
             except Exception:
                 pass
 
         try:
-            req = urllib.request.Request(f"{remote_target.split('?')[0].rstrip('/')}/tokens", headers=headers)
+            req = urllib.request.Request(f"{connect_target.split('?')[0].rstrip('/')}/tokens", headers=headers)
             with urllib.request.urlopen(req, timeout=5) as response:
                 COMPILED_TOKENS = json.loads(response.read().decode())
             print(f"[+] Synced {len(COMPILED_TOKENS)} remote blueprints.")
@@ -629,7 +714,7 @@ def main():
             sys.exit(1)
 
         try:
-            req = urllib.request.Request(f"{remote_target.split('?')[0].rstrip('/')}/token-tree", headers=headers)
+            req = urllib.request.Request(f"{connect_target.split('?')[0].rstrip('/')}/token-tree", headers=headers)
             with urllib.request.urlopen(req, timeout=10) as response:
                 if response.status == 403:
                     print("[-] Master does not allow distributed connections (--connectable is disabled on the server).")
@@ -637,11 +722,11 @@ def main():
                 token_tree = json.loads(response.read().decode())
                 signature = token_tree.pop('signature', None)
                 if signature:
-                    if not args.key:
+                    if not key:
                         print("[-] The master requires a shared key. Please provide the --key argument.")
                         sys.exit(1)
                     payload_json = json.dumps(token_tree, sort_keys=True, separators=(',', ':')).encode('utf-8')
-                    expected_sig = hmac.new(args.key.encode('utf-8'), payload_json, hashlib.sha256).hexdigest()
+                    expected_sig = hmac.new(key.encode('utf-8'), payload_json, hashlib.sha256).hexdigest()
                     if not hmac.compare_digest(expected_sig, signature):
                         raise ValueError("Invalid signature – possible tampering or wrong key")
                     print("[+] Token tree signature verified.")
@@ -675,64 +760,46 @@ def main():
         if TEMP_DIR not in sys.path:
             sys.path.insert(0, TEMP_DIR)
 
-        if requires:
-            if args.allow_deps:
-                print("[*] Installing external dependencies...")
-                venv_dir = os.path.join(TEMP_DIR, '.venv')
-                try:
-                    subprocess.run([sys.executable, '-m', 'venv', venv_dir], check=True, capture_output=True)
-                except subprocess.CalledProcessError as e:
-                    print(f"[!] Failed to create virtual environment: {e.stderr.decode()}")
-                    sys.exit(1)
-
-                if os.name == 'nt':
-                    pip_path = os.path.join(venv_dir, 'Scripts', 'pip.exe')
-                    py_path = os.path.join(venv_dir, 'Scripts', 'python.exe')
-                else:
-                    pip_path = os.path.join(venv_dir, 'bin', 'pip')
-                    py_path = os.path.join(venv_dir, 'bin', 'python')
-
-                cache_dir = os.path.join(TEMP_DIR, 'pip_cache')
-                env = os.environ.copy()
-                env['PIP_CACHE_DIR'] = cache_dir
-
-                for dep in requires:
-                    print(f"  - Installing {dep}")
-                    try:
-                        subprocess.run([pip_path, 'install', dep], check=True, capture_output=True, text=True, env=env)
-                    except subprocess.CalledProcessError as e:
-                        print(f"[!] Failed to install {dep}: {e.stderr}")
-                        print("[!] The script may fail due to missing dependencies.")
-
-                try:
-                    result = subprocess.run([py_path, '-c', "import site; print(';'.join(site.getsitepackages()))"],
-                                            capture_output=True, text=True, env=env)
-                    if result.returncode == 0:
-                        site_packages = result.stdout.strip().split(';')
-                        for sp in site_packages:
-                            if sp not in sys.path:
-                                sys.path.append(sp)
-                except Exception:
-                    if os.name == 'nt':
-                        lib_path = os.path.join(venv_dir, 'Lib', 'site-packages')
-                    else:
-                        lib_path = os.path.join(venv_dir, 'lib', f'python{sys.version_info.major}.{sys.version_info.minor}', 'site-packages')
-                    if os.path.isdir(lib_path) and lib_path not in sys.path:
-                        sys.path.append(lib_path)
-                print("[+] Dependencies installed.")
-            else:
-                print(f"[!] This project requires external dependencies: {', '.join(requires)}")
-                print("[!] Use --allow-deps to install them in a temporary venv.")
-                print("[!] The script may fail if these are not already installed globally.")
-
-        if args.entrypoint:
-            main_script = args.entrypoint
-            if not os.path.isfile(os.path.join(TEMP_DIR, main_script)):
-                print(f"[!] Specified entrypoint '{main_script}' not found in the bundle.")
+        if requires and allow_deps:
+            print("[*] Installing external dependencies...")
+            venv_dir = os.path.join(TEMP_DIR, '.venv')
+            try:
+                subprocess.run([sys.executable, '-m', 'venv', venv_dir], check=True, capture_output=True)
+            except subprocess.CalledProcessError as e:
+                print(f"[!] Failed to create virtual environment: {e.stderr.decode()}")
                 sys.exit(1)
+
+            pip_path = os.path.join(venv_dir, 'Scripts' if os.name == 'nt' else 'bin', 'pip')
+            py_path = os.path.join(venv_dir, 'Scripts' if os.name == 'nt' else 'bin', 'python')
+            env = os.environ.copy()
+            env['PIP_CACHE_DIR'] = os.path.join(TEMP_DIR, 'pip_cache')
+
+            for dep in requires:
+                print(f"  - Installing {dep}")
+                try:
+                    subprocess.run([pip_path, 'install', dep], check=True, capture_output=True, text=True, env=env)
+                except subprocess.CalledProcessError as e:
+                    print(f"[!] Failed to install {dep}: {e.stderr}")
+            # Add venv to path
+            try:
+                result = subprocess.run([py_path, '-c', "import site; print(';'.join(site.getsitepackages()))"],
+                                        capture_output=True, text=True, env=env)
+                if result.returncode == 0:
+                    for sp in result.stdout.strip().split(';'):
+                        if sp not in sys.path:
+                            sys.path.append(sp)
+            except Exception:
+                lib_path = os.path.join(venv_dir, 'Lib' if os.name == 'nt' else 'lib',
+                                        f'python{sys.version_info.major}.{sys.version_info.minor}', 'site-packages')
+                if os.path.isdir(lib_path) and lib_path not in sys.path:
+                    sys.path.append(lib_path)
+            print("[+] Dependencies installed.")
+
+        if entrypoint:
+            main_script = entrypoint
         else:
-            main_candidates = [f for f in os.listdir(TEMP_DIR) if f.endswith('.py')]
-            main_script = next((f for f in main_candidates if f == 'main.py'), main_candidates[0] if main_candidates else None)
+            candidates = [f for f in os.listdir(TEMP_DIR) if f.endswith('.py')]
+            main_script = next((f for f in candidates if f == 'main.py'), candidates[0] if candidates else None)
             if not main_script:
                 print("[!] No Python files found in the downloaded bundle.")
                 sys.exit(1)
@@ -751,12 +818,9 @@ def main():
 
     # --- DEFAULT MODE & MODE 1 (Master) ---
     else:
-        if not args.script:
+        if not script_path:
             parser.print_help()
             sys.exit(1)
-
-        script_path = os.path.abspath(args.script)
-        PROJECT_DIR = os.path.dirname(script_path)
 
         if PROJECT_DIR not in sys.path:
             sys.path.insert(0, PROJECT_DIR)
@@ -775,14 +839,14 @@ def main():
         parser_obj = PybroUIParser(module=TARGET_MODULE)
         parser_obj.visit(ast_tree)
 
-        if args.shared:
+        if shared:
             bind_ip = "0.0.0.0"
-            SESSION_KEY = args.key if args.key else secrets.token_hex(4)
+            SESSION_KEY = key if key else secrets.token_hex(4)
         else:
             bind_ip = "127.0.0.1"
 
-        if args.connectable:
-            if not args.shared:
+        if connectable:
+            if not shared:
                 print("[!] --connectable requires --shared (shared mode). Exiting.")
                 sys.exit(1)
             if SESSION_KEY:
@@ -792,27 +856,29 @@ def main():
                 print("[!] --connectable requires a shared key. Use --shared --key <secret>.")
                 sys.exit(1)
 
-    if TEMP_DIR and not args.keep_script:
+    # --- Cleanup of temporary dir ---
+    if TEMP_DIR and not keep_script:
         def cleanup_temp_dir():
             if os.path.exists(TEMP_DIR):
                 shutil.rmtree(TEMP_DIR)
                 print(f"[-] Temporary codebase {TEMP_DIR} deleted.")
         atexit.register(cleanup_temp_dir)
 
+    # --- SSL setup ---
     ssl_context = None
-    cert_file = None
-    key_file = None
-    if args.ssl:
-        if args.cert_file and args.key_file:
-            if not os.path.exists(args.cert_file):
-                print(f"[!] Certificate file not found: {args.cert_file}")
+    cert_file_temp = None
+    key_file_temp = None
+    if ssl_enabled:
+        if cert_file and key_file:
+            if not os.path.exists(cert_file):
+                print(f"[!] Certificate file not found: {cert_file}")
                 sys.exit(1)
-            if not os.path.exists(args.key_file):
-                print(f"[!] Key file not found: {args.key_file}")
+            if not os.path.exists(key_file):
+                print(f"[!] Key file not found: {key_file}")
                 sys.exit(1)
             ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             try:
-                ssl_context.load_cert_chain(args.cert_file, args.key_file)
+                ssl_context.load_cert_chain(cert_file, key_file)
                 print("[*] Using provided TLS certificate.")
             except Exception as e:
                 print(f"[!] Failed to load certificate/key: {e}")
@@ -824,23 +890,18 @@ def main():
                 sys.exit(1)
             if not hasattr(ssl.SSLContext, 'generate_self_signed_certificate'):
                 print("[!] Your Python installation does not support automatic self‑signed certificates.")
-                print("[!] Provide your own certificate with --cert-file and --key-file, or use a reverse proxy.")
                 sys.exit(1)
             try:
                 ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-                cert_pem, key_pem = ssl_context.generate_self_signed_certificate(
-                    ("localhost",), valid_days=365
-                )
-                cert_file = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.pem')
-                cert_file.write(cert_pem)
-                cert_file.close()
-                key_file = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.pem')
-                key_file.write(key_pem)
-                key_file.close()
-                ssl_context.load_cert_chain(cert_file.name, key_file.name)
-
-                cert_der = ssl.PEM_cert_to_DER_cert(cert_pem)
-                fingerprint = hashlib.sha256(cert_der).hexdigest()
+                cert_pem, key_pem = ssl_context.generate_self_signed_certificate(("localhost",), valid_days=365)
+                cert_file_temp = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.pem')
+                cert_file_temp.write(cert_pem)
+                cert_file_temp.close()
+                key_file_temp = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.pem')
+                key_file_temp.write(key_pem)
+                key_file_temp.close()
+                ssl_context.load_cert_chain(cert_file_temp.name, key_file_temp.name)
+                fingerprint = hashlib.sha256(ssl.PEM_cert_to_DER_cert(cert_pem)).hexdigest()
                 print(f"[*] Self‑signed certificate SHA256 fingerprint: {fingerprint}")
             except Exception as e:
                 print(f"[!] Failed to generate SSL certificate: {e}")
@@ -852,11 +913,11 @@ def main():
 
     try:
         with ThreadedTCPServer((bind_ip, port), EphemeralServer) as httpd:
-            httpd.verbose = args.verbose
-            httpd.os_timeout = args.os_timeout
-            # Attach custom CSS path to server instance
-            if args.custom_css:
-                httpd.custom_css_path = os.path.abspath(args.custom_css)
+            httpd.verbose = verbose
+            httpd.os_timeout = os_timeout
+            httpd.poll_interval = poll_interval
+            if custom_css:
+                httpd.custom_css_path = os.path.abspath(custom_css)
 
             if ssl_context:
                 httpd.socket = ssl_context.wrap_socket(httpd.socket, server_side=True)
@@ -868,7 +929,7 @@ def main():
 
             if SESSION_KEY:
                 print(f"[⚠️] SECURITY ENFORCED: Shared Key Mode active.")
-                if args.connectable:
+                if connectable:
                     print(f"[⚠️] Distributed connections ENABLED (--connectable)")
                 else:
                     print(f"[⚠️] Distributed connections DISABLED (no --connectable)")
@@ -878,10 +939,10 @@ def main():
             else:
                 print(f"[*] Security Layer: Local Sandbox Mode (No Key Required)")
                 print(f"=======================================================\n")
-                if not args.connect:
+                if not connect_target:
                     webbrowser.open(f"{protocol}://localhost:{port}")
 
-            if args.watch and not args.connect:
+            if watch and not connect_target:
                 print("[*] Starting file watcher on", script_path)
                 threading.Thread(target=watch_script, args=(script_path,), daemon=True).start()
 
@@ -892,10 +953,10 @@ def main():
         print(f"[!] Could not start server: {e}")
         sys.exit(1)
     finally:
-        if cert_file:
-            os.unlink(cert_file.name)
-        if key_file:
-            os.unlink(key_file.name)
+        if cert_file_temp:
+            os.unlink(cert_file_temp.name)
+        if key_file_temp:
+            os.unlink(key_file_temp.name)
 
 
 if __name__ == "__main__":

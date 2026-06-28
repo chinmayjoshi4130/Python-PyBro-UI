@@ -1,43 +1,47 @@
+---
+
 # Pybro Token Reference
 
 This document describes every UI token produced by the Pybro parser – its Python call, the HTML it generates, and the CSS classes / inner elements you can target with a custom stylesheet.
 
-Use this reference together with the `class_` argument on tokens and the `--custom-css` flag on the server to completely restyle your dashboard.
+Use this reference together with the class_ argument on tokens and the --custom-css flag on the server to completely restyle your dashboard.
 
 ---
 
-## How styling works
+How styling works
 
-- **`css` argument** – a dict of `property: value` pairs applied as inline styles on the token’s outermost element.
-- **`class_` argument** – a CSS class name added to the outermost element.
-- **`--custom-css` file** – a stylesheet loaded after the built‑in CSS. Use descendant selectors to style inner elements.
+· css argument – a dict of property: value pairs applied as inline styles on the token’s outermost element.
+· class_ argument – a CSS class name added to the outermost element.
+· --custom-css file – a stylesheet loaded after the built‑in CSS. Use descendant selectors to style inner elements.
 
-The outermost element for most tokens is a `<div class="component">`. For titles it is the `<h1>` itself; for layout rows it is a `<div class="ui-row">`.
+The outermost element for most tokens is a <div class="component">. For titles it is the <h1> itself; for layout rows it is a <div class="ui-row">; for sections it is a <div class="section">.
 
 ---
 
-## Token catalogue
+Token catalogue
 
-### `UI_TITLE`
+UI_TITLE
+
 ```
-
 ui.title("text")
-
 ```
-**DOM:**  
-`<h1>text</h1>`  
-- `css` and `class_` are applied directly to the `<h1>`.
-- No inner elements.
+
+DOM:
+<h1>text</h1>
+
+· css and class_ are applied directly to the <h1>.
+· No inner elements.
 
 ---
 
-### `UI_INPUT`
-```
+UI_INPUT
 
+```
 ui.input_text("id", "label")
-
 ```
-**DOM (inside wrapper):**
+
+DOM (inside wrapper):
+
 ```html
 <label>label</label>
 <input id="id" type="text">
@@ -157,11 +161,11 @@ DOM (inside wrapper):
 <div id="target_id" class="terminal">Console idle.</div>
 ```
 
-Target inner elements:
-
-· button[data-os-cmd] – the execute button
-· label – the “System Buffer Output” label
-· .terminal – the output display div
+· The command runs synchronously (blocking); the output appears in the terminal after completion.
+· Target inner elements:
+  · button[data-os-cmd] – the execute button
+  · label – the “System Buffer Output” label
+  · .terminal – the output display div
 
 ---
 
@@ -219,7 +223,7 @@ ui.row_end()
 
 DOM:
 A <div class="ui-row"> wraps the content between start and end.
-css and class_ are applied to this row <div>. There are no inner child components directly attached to the row token itself; its children are normal component wrappers.
+css and class_ are applied to this row <div>. Its children are normal component wrappers.
 
 ---
 
@@ -241,6 +245,43 @@ These tokens have no css or class_ arguments. Their visual style can only be cha
 .page-nav-btn { ... }
 .tab-btn { ... }
 ```
+
+---
+
+Section tokens (hideable blocks)
+
+Sections let you pre‑define blocks of UI that can be shown/hidden at runtime without destroying their internal form state. They are simply hidden via display: none.
+
+Token Python call Description
+SECTION_START ui.section_start("section_id", visible=True) Starts a new section with a unique id and an optional visible keyword argument (default True). The token also accepts css and class_ for the wrapper.
+SECTION_END ui.section_end() Ends the current section.
+
+DOM:
+A <div class="section" id="section-section_id"> wraps all tokens between start and end.
+If visible is False, the section gets style="display: none".
+
+Dynamic toggling:
+Use the set_section_visible patch action to toggle visibility from a callback:
+
+```python
+return [{"action": "set_section_visible", "token_index": 5, "visible": True}]
+```
+
+---
+
+Dynamic token patches
+
+Callbacks can return a list of patch dictionaries to modify tokens on the fly. The server applies the changes to the compiled token list and re‑renders the UI.
+
+Action Effect Extra Fields
+set_text Changes UI_TITLE.text or UI_CALLBACK_BUTTON.text value (str)
+set_label Changes a label value (str)
+set_css Replaces inline CSS value (dict)
+set_class Replaces CSS class value (str)
+insert_table_row Appends a row to a UI_TABLE row (list)
+set_table_rows Replaces all rows rows (list of lists)
+set_options Replaces dropdown options options (list)
+set_section_visible Shows/hides a section (SECTION_START) visible (bool)
 
 ---
 
@@ -283,6 +324,16 @@ Custom text input:
 }
 ```
 
+Hide a section initially and style it:
+
+```css
+.my-hidden-section {
+    border: 1px dashed var(--border);
+    padding: 1rem;
+    margin-top: 1rem;
+}
+```
+
 ---
 
 Notes
@@ -290,3 +341,4 @@ Notes
 · All tokens that produce a wrapper (everything except titles, rows, and structural tokens) share the base class component. You can style all widgets globally with .component { ... }.
 · The css argument on a token does not cascade to inner elements; it is applied only to the outermost element (the wrapper). Use class_ + a custom stylesheet for inner styling.
 · Token indexes (used in dynamic patches) are determined by the order of ui.* calls. Open /tokens in the browser to see the exact sequence.
+· Section tokens are part of the token list; their SECTION_START and SECTION_END tokens count toward the index, but they themselves do not produce visible widgets (only the wrapper <div>).
