@@ -266,15 +266,7 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
                                 if target_id_patch:
                                     node = find_node_by_id(state.UI_ROOT, target_id_patch)
                                 else:
-                                    idx = int(patch.get('token_index', -1))
-                                    if idx >= 0:
-                                        flat = flatten_tree(state.UI_ROOT)
-                                        if idx < len(flat):
-                                            node = find_node_by_id(state.UI_ROOT, flat[idx].get('id'))
-                                        else:
-                                            node = None
-                                    else:
-                                        node = None
+                                    node = None
                                 if not node:
                                     continue
                                 if action == 'set_text':
@@ -299,6 +291,9 @@ class EphemeralServer(http.server.SimpleHTTPRequestHandler):
                                 elif action == 'set_options':
                                     if node.type == 'UI_DROPDOWN':
                                         node.attrs['options'] = patch.get('options', [])
+                                elif action == 'set_progress':
+                                    if node.type == 'UI_PROGRESS':
+                                        node.attrs['value'] = int(patch.get('value', 0))
                             flat = flatten_tree(state.UI_ROOT)
                         state.broadcast_event("tokens_updated", json.dumps(flat))
                         response_text = "UI updated"

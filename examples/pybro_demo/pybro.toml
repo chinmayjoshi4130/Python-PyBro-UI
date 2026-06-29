@@ -1,6 +1,6 @@
 [pybro]
 # Project configuration – all values are optional (defaults used otherwise)
-entry-point = "main.py"
+entrypoint = "main.py"
 port = 8080
 watch = true
 custom-css = "theme.css"

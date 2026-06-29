@@ -48,7 +48,7 @@ pybro_ui/
 ├── server.py             # main() – argument parsing & server startup
 ├── index.html            # Single HTML shell, loads the frontend module
 └── static/
-├── utils.js          # Small helpers (escape, auth headers, CSS injection)
+├── utils.js          # Helpers (escape, auth, CSS, Markdown converter)
 ├── state.js          # Form state capture/sync, reactive math
 ├── renderer.js       # Builds the DOM from the token tree, page/tab switching
 ├── sse.js            # SSE client: reconnects and dispatches events
@@ -132,6 +132,9 @@ Inherits from ast.NodeVisitor. This module never executes user code; it only ext
 · Builds the UI_ROOT tree directly using a stack of container nodes.
 · Structural tokens (PAGE_START, SECTION_START, etc.) push/pop the stack; visual tokens become leaf nodes with UINode(type, **attrs).
 
+Supported visual tokens (newer additions included):
+UI_TITLE, UI_INPUT, UI_CHECKBOX, UI_DROPDOWN, UI_TEXT_AREA, UI_CALLBACK_BUTTON, UI_MATH_COMPUTE, OS_GATEKEEPER, UI_TABLE, UI_ROOT_CSS, UI_MARKDOWN, UI_SLIDER, UI_PASSWORD, UI_TOGGLE, UI_PROGRESS, UI_DATE, UI_INPUT_GENERIC.
+
 ---
 
 handler.py – HTTP request handler (EphemeralServer)
@@ -153,7 +156,12 @@ POST endpoints:
 Path Description
 /broadcast_state Receives form state from one client and broadcasts it to all others.
 /execute_os Validates the command against gatekeeper tokens, splits with shlex, optionally checks an allowlist, runs with subprocess.run (no shell=True), and persists output in the target UI_TEXT_AREA.
-/trigger_callback Calls the registered Python function (capturing stdout/stderr), applies any returned patches (by target_id or token_index), persists plain‑text output in the tree, and broadcasts updates.
+/trigger_callback Calls the registered Python function (capturing stdout/stderr), applies any returned patches by target_id (plus the special section_id for toggle_section), persists plain‑text output in the tree, and broadcasts updates.
+
+Patch actions supported:
+set_text, set_label, set_css, set_class, insert_table_row, set_table_rows, set_options, toggle_section, set_progress.
+
+Important change: The deprecated token_index fallback has been removed. Patches must use target_id (or section_id for sections). This makes patching safe and stable regardless of token order.
 
 Security hardening:
 
@@ -223,8 +231,7 @@ Exports small helper functions:
 · getAuthHeaders() — reads the session token from sessionStorage and returns an object for fetch.
 · applyRootCSS(cssVars) — sets CSS custom properties on :root.
 · applyComponentCSS(wrapper, token) — applies inline css and class from a token to a DOM element.
-
-Used by other modules.
+· convertMarkdown(text) — a lightweight, zero‑dependency Markdown‑to‑HTML converter (handles bold, italic, code, headers, lists). Used by the UI_MARKDOWN widget.
 
 state.js
 
@@ -242,7 +249,7 @@ The largest module; builds the DOM from tokens and handles navigation.
 
 · buildPageStructure(tokens) — parses the flat token list into a nested array of pages, tabs, and tokens.
 · renderPages(pages) — creates page navigation buttons and page containers, calls renderTokens for each page/tab content. Resets callbackButtons and globalMathFormulas once per full rebuild.
-· renderTokens(container, tokens) — walks through a token list and creates appropriate DOM elements (inputs, buttons, textareas, tables, etc.), respecting sections and rows via a container stack.
+· renderTokens(container, tokens) — walks through a token list and creates appropriate DOM elements (inputs, buttons, textareas, tables, markdown blocks, sliders, toggles, progress bars, etc.), respecting sections and rows via a container stack.
 · showPage(pageName), showTab(pageName, tabName) — manage visibility classes and update location.hash.
 · attachGlobalListeners() — now a no‑op because all input/button events are handled by delegation (see ensureGlobalDelegation).
 · ensureGlobalDelegation() — attaches one delegated listener to the document for:
@@ -299,9 +306,9 @@ How data flows end‑to‑end
 4. Server starts HTTP server.
 5. Browser loads index.html, which imports app.js and its dependencies.
 6. app.js fetches /tokens → receives flattened token list.
-7. renderer.js rebuilds the DOM from tokens, activating page/tab navigation and rendering all components.
+7. renderer.js rebuilds the DOM from tokens, activating page/tab navigation and rendering all components (including Markdown via the client‑side converter, sliders, progress bars, etc.).
 8. User interacts → inputs fire delegated listeners, reactive math runs, form state syncs to server via /broadcast_state.
-9. User clicks a callback button → app.js sends POST to /trigger_callback, server runs the Python function, applies patches, updates the tree, broadcasts via SSE → frontend rebuilds.
+9. User clicks a callback button → app.js sends POST to /trigger_callback, server runs the Python function, applies patches (by target_id only), updates the tree, broadcasts via SSE → frontend rebuilds.
 10. OS commands follow a similar flow through the gatekeeper modal.
 11. In distributed mode, the client automatically picks up any bundled .css file and serves it, mirroring the master’s look.
 
@@ -315,6 +322,7 @@ Security considerations
 · Distributed mode: The token tree is HMAC‑signed, preventing tampering. Clients must provide the same key to verify.
 · Callback output: Captured with redirect_stdout/stderr to avoid accidental server‑side prints.
 · Thread safety: tree_lock prevents race conditions when the file‑watcher, SSE broadcaster, and request handlers mutate the UI tree simultaneously.
+· Patch targeting: Uses explicit target_id (or section_id for sections) — no fragile token indexes, reducing risk of mis‑targeted updates.
 
 ---
 

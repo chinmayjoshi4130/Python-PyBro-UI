@@ -240,6 +240,50 @@ export function renderTokens(container, tokens) {
                     }
                     wrapper.innerHTML += tableHtml;
                     break;
+                case "UI_MARKDOWN":
+                    import('./utils.js').then(m => {
+                        wrapper.innerHTML = `<div class="markdown-content">${m.convertMarkdown(tok.text)}</div>`;
+                    });
+                    break;
+                case "UI_SLIDER":
+                    const min = tok.min !== undefined ? tok.min : 0;
+                    const max = tok.max !== undefined ? tok.max : 100;
+                    const step = tok.step !== undefined ? tok.step : 1;
+                    wrapper.innerHTML = `
+                        <label>${tok.label} (<span id="${tok.id}-value">${min}</span>)</label>
+                        <input type="range" id="${tok.id}" min="${min}" max="${max}" step="${step}" value="${min}"
+                               oninput="document.getElementById('${tok.id}-value').innerText = this.value">
+                    `;
+                    break;
+                case "UI_PASSWORD":
+                    wrapper.innerHTML = `<label>${tok.label}</label><input id="${tok.id}" type="password">`;
+                    break;
+                case "UI_TOGGLE":
+                    const checked = tok.checked ? 'checked' : '';
+                    wrapper.innerHTML = `
+                        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                            <input id="${tok.id}" type="checkbox" ${checked}
+                                   style="appearance:none; width:44px; height:24px; background:${tok.checked ? 'var(--accent)' : '#444'}; border-radius:12px; position:relative; transition:background 0.2s; cursor:pointer; outline:none;"
+                                   onchange="this.style.background = this.checked ? 'var(--accent)' : '#444'">
+                            ${tok.label}
+                        </label>`;
+                    break;
+                case "UI_PROGRESS":
+                    const progValue = tok.value || 0;
+                    const progMax = tok.max || 100;
+                    wrapper.innerHTML = `
+                        <label>${tok.label}</label>
+                        <div style="background:#1a2236; border-radius:6px; overflow:hidden; height:20px;">
+                            <div id="${tok.id}" style="background:var(--accent); height:100%; width:${(progValue / progMax) * 100}%; transition:width 0.3s;"></div>
+                        </div>`;
+                    break;
+                case "UI_DATE":
+                    wrapper.innerHTML = `<label>${tok.label}</label><input id="${tok.id}" type="date">`;
+                    break;
+                case "UI_INPUT_GENERIC":
+                    const itype = tok.input_type || 'text';
+                    wrapper.innerHTML = `<label>${tok.label}</label><input id="${tok.id}" type="${itype}">`;
+                    break;
             }
             containers[containers.length - 1].appendChild(wrapper);
         }

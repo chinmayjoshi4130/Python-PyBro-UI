@@ -1,42 +1,41 @@
----
-
-Pybro Token Reference
+# Pybro Token Reference
 
 This document describes every UI token produced by the Pybro parser – its Python call, the HTML it generates, the styling classes / inner elements you can target, and how dynamic updates (patches) work.
 
 ---
 
-How styling works
+## How styling works
 
-· css argument – a dict of property: value pairs applied as inline styles on the token’s outermost element.
-· class_ argument – a CSS class name added to that same outermost element.
-· --custom-css file – a stylesheet loaded after the built‑in CSS. Use descendant selectors to reach inner elements like <label>, <input>, <textarea>, etc.
+- **`css` argument** – a `dict` of `property: value` pairs applied as inline styles on the token’s **outermost element**.
+- **`class_` argument** – a CSS class name added to that same outermost element.
+- **`--custom-css` file** – a stylesheet loaded *after* the built‑in CSS. Use descendant selectors to reach inner elements like `<label>`, `<input>`, `<textarea>`, etc.
 
-The outermost element for most visual tokens is a <div class="component">.
-For titles it is the <h1> itself; for layout rows it is a <div class="ui-row">; for sections it is a <div class="section">.
-
----
-
-Built‑in CSS variables (customisable via ui.root_css or --custom-css)
-
-Variable Default Role
---bg #0b0f19 Page background
---surface #131a2b Card/component background
---border #2a3350 Borders
---text #e0e6f0 Body text
---accent #6e8efb Highlights, links
---green #00e676 Terminal text, success
---red #ff5252 Errors, warnings
---radius 12px Border radius
---shadow 0 8px … Component shadow
-
-You can override them globally with ui.root_css({…}) at the top of your script, or via your custom CSS file.
+The outermost element for most visual tokens is a `<div class="component">`.  
+For titles it is the `<h1>` itself; for layout rows it is a `<div class="ui-row">`; for sections it is a `<div class="section">`.
 
 ---
 
-Token catalogue
+## Built‑in CSS variables (customisable via `ui.root_css` or `--custom-css`)
 
-UI_TITLE
+| Variable    | Default    | Role                     |
+|-------------|------------|--------------------------|
+| `--bg`      | `#0b0f19`  | Page background          |
+| `--surface` | `#131a2b`  | Card/component background|
+| `--border`  | `#2a3350`  | Borders                  |
+| `--text`    | `#e0e6f0`  | Body text                |
+| `--accent`  | `#6e8efb`  | Highlights, links        |
+| `--green`   | `#00e676`  | Terminal text, success   |
+| `--red`     | `#ff5252`  | Errors, warnings         |
+| `--radius`  | `12px`     | Border radius            |
+| `--shadow`  | `0 8px …`  | Component shadow         |
+
+You can override them globally with `ui.root_css({…})` at the top of your script, or via your custom CSS file.
+
+---
+
+## Token catalogue
+
+### `UI_TITLE`
 
 ```python
 ui.title("text", css={...}, class_="...")
@@ -155,7 +154,7 @@ If target_id is set, that element will receive the immediate output and, for tex
 UI_MATH_COMPUTE
 
 ```python
-ui.math_compute("target_id", "{a} + {b}", css={...}, class_="...")
+ui.math_compute("target_id", "{a} + {b}")
 ```
 
 Does not produce visible DOM.
@@ -239,6 +238,142 @@ Use this at the top of your script before any UI components.
 
 ---
 
+UI_MARKDOWN (new)
+
+```python
+ui.markdown("## Title\n\nSome **bold** text.")
+```
+
+DOM (inside wrapper):
+
+```html
+<div class="markdown-content"><h2>Title</h2><p>Some <strong>bold</strong> text.</p></div>
+```
+
+The Markdown is converted to HTML client‑side using a lightweight, zero‑dependency converter (handles headers, bold, italic, code, lists, paragraphs). No user input is interpreted – the content is static.
+
+Target inner elements: .markdown-content, and standard HTML elements inside it (h1–h3, p, strong, em, code, ul, li).
+
+---
+
+UI_SLIDER (new)
+
+```python
+ui.slider("id", "Label", min, max, step=1, css={...}, class_="...")
+```
+
+DOM (inside wrapper):
+
+```html
+<label>Label (<span id="id-value">…</span>)</label>
+<input type="range" id="id" min="..." max="..." step="...">
+```
+
+The current value is displayed next to the label and updates live. The slider is a standard <input>; its value is included in getFormState() and callbacks receive it as a string.
+
+Target inner elements: label, input[type="range"], the value span (#id-value).
+
+---
+
+UI_PASSWORD (new)
+
+```python
+ui.password("id", "label", css={...}, class_="...")
+```
+
+DOM (inside wrapper):
+
+```html
+<label>label</label>
+<input id="id" type="password">
+```
+
+Behaves like ui.input_text but renders a masked input field. The value is still collected by getFormState().
+
+Target inner elements: label, input[type="password"]
+
+---
+
+UI_TOGGLE (new)
+
+```python
+ui.toggle("id", "label", checked=False, css={...}, class_="...")
+```
+
+DOM (inside wrapper):
+
+```html
+<label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+  <input id="id" type="checkbox" checked style="appearance:none; width:44px; height:24px; …">
+  label
+</label>
+```
+
+A pure‑CSS toggle switch. The checked state is a boolean; callbacks receive True/False via form['id'].
+
+Target inner elements: label, input[type="checkbox"]
+
+---
+
+UI_PROGRESS (new)
+
+```python
+ui.progress("id", "label", value=0, max=100, css={...}, class_="...")
+```
+
+DOM (inside wrapper):
+
+```html
+<label>label</label>
+<div style="background:#1a2236; border-radius:6px; overflow:hidden; height:20px;">
+  <div id="id" style="background:var(--accent); height:100%; width:...%;"></div>
+</div>
+```
+
+A visual progress bar. It is not a form input – the value is updated via the set_progress patch action from a callback.
+
+Target inner elements: the outer <div>, the inner #id progress fill.
+
+---
+
+UI_DATE (new)
+
+```python
+ui.date("id", "label", css={...}, class_="...")
+```
+
+DOM (inside wrapper):
+
+```html
+<label>label</label>
+<input id="id" type="date">
+```
+
+Uses the browser’s native date picker. The value (a string like "2026-07-01") is collected by getFormState().
+
+Target inner elements: label, input[type="date"]
+
+---
+
+UI_INPUT_GENERIC (new)
+
+```python
+ui.input("id", "label", type="number", css={...}, class_="...")
+```
+
+DOM (inside wrapper):
+
+```html
+<label>label</label>
+<input id="id" type="number">
+```
+
+A generic HTML5 input. The type argument can be any valid HTML5 input type ("number", "email", "color", "url", etc.). The value is collected by getFormState().
+
+Target inner elements: label, input[type="..."]
+
+---
+
 Layout tokens
 
 LAYOUT_ROW_START / LAYOUT_ROW_END
@@ -305,8 +440,9 @@ Callbacks can return patches to modify the UI without a full page reload. Patche
 
 Targeting a token
 
-Every patch may include either target_id (string) or token_index (integer).
-target_id is the preferred, stable way. The token_index approach is deprecated and may be removed in future versions.
+Every patch must include a target_id (string) that matches the id attribute of the target token.
+The only exception is toggle_section, which uses section_id instead.
+The deprecated token_index has been removed – targeting is purely ID‑based.
 
 Available patch actions
 
@@ -319,6 +455,7 @@ insert_table_row UI_TABLE row (list)
 set_table_rows UI_TABLE rows (list of lists)
 set_options UI_DROPDOWN options (list)
 toggle_section SECTION_START section_id (str), visible (bool)
+set_progress UI_PROGRESS value (int)
 
 Example: Append a row to a table identified by target_id="log_table":
 
@@ -328,6 +465,12 @@ def update_log(form):
         {"action": "insert_table_row", "target_id": "log_table",
          "row": ["12:00", form.get("action"), "OK"]}
     ]
+```
+
+Example: Update a progress bar:
+
+```python
+return [{"action": "set_progress", "target_id": "scan_progress", "value": 75}]
 ```
 
 ---
@@ -369,13 +512,26 @@ Custom text input:
 }
 ```
 
+Custom markdown:
+
+```css
+.markdown-content h2 { color: var(--accent); }
+.markdown-content code { background: #1a1a2e; }
+```
+
+Custom slider:
+
+```css
+input[type="range"] { accent-color: var(--accent); }
+```
+
 ---
 
 Notes
 
 · All visual tokens that produce a wrapper (except titles and rows) share the base class component. Style them globally with .component { ... }.
 · The css argument does not cascade to inner elements. Use class_ + a custom stylesheet for inner styling.
-· Token indexes are deprecated – use target_id wherever possible.
+· Token indexes have been removed. Use target_id for all patches; for sections use section_id.
 · The /tokens endpoint shows the current token list; this is the sequence the parser builds from your ui.* calls.
 · Section start/end tokens are part of the token list but don’t produce visible widgets (only the wrapper div).
 · All callback functions receive the current form state as a dict. They must be defined at the module level.

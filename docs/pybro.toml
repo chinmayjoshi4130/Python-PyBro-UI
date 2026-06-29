@@ -11,7 +11,7 @@
 
 # Main Python file to run (default: first .py file found, or main.py)
 # Only needed if you want to explicitly set the entry point.
-# entry-point = "main.py"
+# entrypoint = "main.py"
 
 # Server port (default: 8080)
 # port = 8080
@@ -61,6 +61,9 @@
 # (Mode 2) Explicit main script filename inside the downloaded bundle (default: auto‑detect)
 # entrypoint = "main.py"
 
+# Restrict OS commands to this list (first word of command). Omit or leave empty to allow all.
+# allowed_commands = ["ping", "echo", "ls", "whoami"]
+
 # ----------------------------------------------------------------------
 # Distribution settings (used for bundling / Mode 2)
 # ----------------------------------------------------------------------
@@ -68,7 +71,8 @@
 
 # Files or directories to include in the distributed bundle.
 # If not set, all .py files (excluding .git, __pycache__, venv, etc.) are collected automatically.
-# include = ["main.py", "scanner/", "utils.py"]
+# For CSS to be shared with Mode 2 clients, add your stylesheet here.
+# include = ["main.py", "scanner/", "utils.py", "theme.css"]
 
 # Pip dependencies required by the project.
 # Example: requires = ["requests>=2.25", "rich"]

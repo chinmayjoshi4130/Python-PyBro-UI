@@ -129,6 +129,40 @@ class PybroUIParser(ast.NodeVisitor):
                         table_id = args[2]
                     if table_id:
                         attrs["id"] = table_id
+                # --- Markdown block ---
+                elif func_name == 'markdown' and args:
+                    token_type = "UI_MARKDOWN"
+                    attrs = {"text": args[0]}
+                # --- Slider ---
+                elif func_name == 'slider' and len(args) >= 3:
+                    token_type = "UI_SLIDER"
+                    attrs = {
+                        "id": args[0],
+                        "label": args[1],
+                        "min": args[2] if len(args) >= 3 else 0,
+                        "max": args[3] if len(args) >= 4 else 100,
+                        "step": args[4] if len(args) >= 5 else 1
+                    }
+                elif func_name == 'password' and len(args) >= 2:
+                    token_type = "UI_PASSWORD"
+                    attrs = {"id": args[0], "label": args[1]}
+                elif func_name == 'toggle' and len(args) >= 2:
+                    token_type = "UI_TOGGLE"
+                    attrs = {"id": args[0], "label": args[1], "checked": bool(args[2]) if len(args) >= 3 else False}
+                elif func_name == 'progress' and len(args) >= 2:
+                    token_type = "UI_PROGRESS"
+                    attrs = {
+                        "id": args[0],
+                        "label": args[1],
+                        "value": args[2] if len(args) >= 3 else 0,
+                        "max": args[3] if len(args) >= 4 else 100
+                    }
+                elif func_name == 'date' and args:
+                    token_type = "UI_DATE"
+                    attrs = {"id": args[0], "label": args[1] if len(args) >= 2 else ""}
+                elif func_name == 'input' and len(args) >= 2:
+                    token_type = "UI_INPUT_GENERIC"
+                    attrs = {"id": args[0], "label": args[1], "input_type": args[2] if len(args) >= 3 else "text"}
                 elif func_name == 'root_css' and len(args) >= 1:
                     token_type = "UI_ROOT_CSS"
                     attrs = {"css_vars": args[0]}

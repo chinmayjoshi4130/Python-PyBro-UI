@@ -1,19 +1,21 @@
 # Pybro
 
-**Pybro** is a zero‑dependency Python dashboard runtime for automation scripts.  
-It parses declarative UI code using Python’s AST and serves a live, reactive interface in any modern browser.  
-Use it when you need a quick form‑based tool, live script output, or a simple team dashboard – without touching a front‑end stack.
+Pybro is a zero‑dependency UI sketchpad for Python developers.  
+Write your backend logic (APIs, data pipelines, automation scripts), wrap it in a reactive UI using pure Python, and launch a live browser interface in under 10 seconds.
+
+Use Pybro to validate workflows and gather team feedback before committing to a heavy frontend stack.  
+No Node.js, no build systems, no HTML required.
 
 > **Note**  
-> Pybro was built for Termux on Android and is used daily with Chrome, Brave, and DuckDuckGo.  
+> Pybro was built for Termux on Android and is used daily with Chrome, Brave, and DuckDuckGo — making it the perfect companion for prototyping on the go.  
 > Most core functionality is well‑tested, but device and browser coverage is still growing.  
 > If you hit a bug, please open an issue with reproduction steps and your device / browser details.
 
 > ⚠️ **Early Development**  
 > Pybro is under active development and may change rapidly.  
 > Expect breaking changes, incomplete docs, and the occasional rough edge.  
-> It is already used in production by its creator, but broad testing is still underway.  
-> **Feedback, bug reports, and pull requests are extremely welcome.**
+> It is prototyping‑first, though many internal automations run on it long‑term without issue.  
+> Broad testing is still underway — feedback, bug reports, and pull requests are extremely welcome.
 
 ---
 
@@ -27,25 +29,27 @@ Use it when you need a quick form‑based tool, live script output, or a simple 
 - **Global theme overrides** – `ui.root_css({...})` changes colours, fonts, and radii everywhere.
 - **Simple variable resolution** – the parser follows top‑level assignments so you can define `HEADERS = [...]` and use it directly in `ui.table(HEADERS, ...)`.
 - **Multi‑page & tab navigation** – `ui.page_start` / `ui.page_end` and `ui.tab_group_start` / `ui.tab_end` create full page structures with local tab bars.
-- **Dynamic token patches** – callbacks can return patch actions (`set_text`, `insert_table_row`, `toggle_section`, etc.) that modify the live UI instantly.
+- **Dynamic token patches** – callbacks can return patch actions (`set_text`, `insert_table_row`, `toggle_section`, `set_progress`, etc.) that modify the live UI instantly. Patches target tokens by `target_id` (no fragile indexes).
 - **Localhost & shared deployment** – safe single‑user mode and authenticated team‑sharing mode.
-- **OS command execution** – shell commands run after explicit browser confirmation; output goes to a terminal div (blocking, with timeout).
-- **Volatile memory lifespan** – quitting the server wipes all temporary state; nothing is persisted to disk by default.
+- **Distributed sandbox client** – Mode 2 downloads the signed project tree and mirrors the master’s UI, with automatic CSS detection.
+- **OS command execution** – shell commands run after explicit browser confirmation; output goes to a terminal div (blocking, with timeout). Uses `shlex.split()` to avoid shell injection.
+- **Volatile memory lifespan** – quitting the server wipes all temporary state; nothing is persisted to disk by default. Perfect for throwaway prototypes.
 - **Multi‑file projects** – the engine adds your script’s directory to `sys.path` so you can import helper modules.
 - **Keyword argument support** – `target_id`, `css`, `class_` are all recognised as named arguments.
 - **File watcher (`--watch`)** – auto‑reloads the script on changes, re‑compiles tokens, and refreshes all browsers.
 - **SSE heartbeat** – keeps connections alive on mobile or proxy networks.
 - **Debounced form sync** – batches rapid input changes to reduce network load.
 - **Explicit button types** – dynamic buttons carry `type="button"` to avoid accidental form submissions.
+- **Modern widget set** – password fields, toggle switches, sliders, date pickers, progress bars, Markdown blocks, and generic HTML5 inputs are built in.
 
 ---
 
 ## 🚧 In progress / experimental
 
-- **Project bundling** – Mode 2 can now download an entire project directory and serve it locally (`--connect`).
 - **Auto‑install dependencies** – with `--allow-deps`, a temporary venv is created and `pybro.toml` requirements are installed.
 - **Built‑in TLS / SSL** – HTTPS is supported via `--ssl`. You can provide your own certificate or let Pybro generate a self‑signed one (Python ≥ 3.9).
 - **Signed token‑tree distribution** – in shared mode, the master builds an HMAC‑SHA256 signed tree that the client verifies before execution.
+- **Persistent state** – optional `--state-file` flag to save/load form state across restarts (planned).
 
 ---
 
@@ -62,7 +66,7 @@ It makes the pybro command available in your current environment.
 
 ##⚡ Quick start
 
-1. Write a blueprint script
+### 1. Write a blueprint script
 
 ```python
 from pybro import ui
@@ -87,7 +91,7 @@ ui.button_callback(
 )
 ```
 
-2. Run it
+### 2. Run it
 
 ```bash
 pybro my_tool.py
@@ -95,7 +99,7 @@ pybro my_tool.py
 
 Open http://localhost:8080 in any browser.
 
-3. Try an example
+### 3. Try an example
 
 ```bash
 pybro examples/mytool.py
@@ -105,7 +109,7 @@ pybro examples/mytool.py
 
 ## 🔐 Deployment modes
 
-Mode 0 – Localhost
+### Mode 0 – Localhost
 
 ```bash
 pybro my_tool.py
@@ -113,7 +117,7 @@ pybro my_tool.py
 
 Server listens only on 127.0.0.1. Ideal for personal tools.
 
-Mode 1 – Shared Team Hub
+### Mode 1 – Shared Team Hub
 
 ```bash
 pybro my_tool.py --shared --key mysecret
@@ -123,7 +127,7 @@ Binds to 0.0.0.0. Anyone on your LAN can connect with the correct key (via ?key=
 If you omit --key, a random token is generated and printed.
 Add --connectable to build a signed project tree for secure distribution.
 
-Mode 2 – Distributed Sandbox Client (experimental)
+### Mode 2 – Distributed Sandbox Client (experimental)
 
 ```bash
 pybro --connect 192.168.1.45:8080 --key mysecret
@@ -170,6 +174,8 @@ ui.tab_end() End the current tab
 ui.tab_group_end() Close the tab group
 ui.row_start() Begin a horizontal flex row
 ui.row_end() End the current row
+ui.section_start("id", visible=True) Start a hideable section
+ui.section_end() End the section
 
 ### Visual tokens
 
@@ -184,13 +190,21 @@ ui.button_callback(text, func, target_id?) Python callback button ui.button_call
 ui.os_command(cmd, desc, target_id) OS command (with confirmation) ui.os_command("ping -c1 1.1.1.1", "Ping", "out")
 ui.table(headers, rows) Static table ui.table(["Name","Age"], [["A",30]])
 ui.root_css(vars_dict) Global theme ui.root_css({"--accent":"red"})
+ui.markdown(text) Rendered Markdown block ui.markdown("## Welcome\n\nHello world")
+ui.slider(id, label, min, max, step=1) Range slider ui.slider("vol", "Volume", 0, 100, 5)
+ui.password(id, label) Password field ui.password("secret", "API Key")
+ui.toggle(id, label, checked=False) Toggle switch ui.toggle("dark", "Dark Mode", True)
+ui.progress(id, label, value=0, max=100) Progress bar ui.progress("scan", "Scan Progress", 0, 100)
+ui.date(id, label) Date picker ui.date("start", "Start Date")
+ui.input(id, label, type="text") Generic HTML5 input ui.input("email", "Email", "email")
 
-Callbacks receive a dict of all current input values, keyed by id. Checkboxes are bool, others are str.
+Callbacks receive a dict of all current input values, keyed by id. Checkboxes are bool, others are str. Slider, password, date, and generic inputs behave identically to input_text from the callback’s perspective.
 
-Dynamic UI updates (token patches)
+### Dynamic UI updates (token patches)
 
 Callbacks can return a list of patch dicts to modify the UI instantly.
-Supported actions: set_text, set_label, set_css, set_class, insert_table_row, set_table_rows, set_options, toggle_section.
+Supported actions: set_text, set_label, set_css, set_class, insert_table_row, set_table_rows, set_options, toggle_section, set_progress.
+All patches target tokens by target_id (sections use section_id). The deprecated token_index has been removed.
 See TOKENS.md and CSS_CUSTOM.md for full details.
 
 ---
@@ -215,11 +229,12 @@ Flag Effect
 ## 🔧 Technical notes
 
 · Variable resolution: Simple top‑level lists/dicts are resolved at parse time. Complex expressions and function calls are not yet supported.
-· OS commands: Must match the exact string defined in the script. They run with a configurable timeout and capture output. Only trusted scripts should define them; an optional allow‑list is available in pybro.toml.
+· OS commands: Must match the exact string defined in the script. They run with a configurable timeout and capture output. Only trusted scripts should define them; an optional allow‑list is available in pybro.toml. Execution uses shlex.split() and shell=False to prevent injection.
 · Real‑time updates: Server‑Sent Events (SSE) push token and form‑state changes to all connected browsers.
 · Signed token tree: In shared/connectable mode, the master signs the project with HMAC‑SHA256; the client verifies before executing.
 · Multi‑file projects: The script’s directory is added to sys.path, so relative imports work.
 · button_callback target_id: Can be a positional argument (third) or keyword (target_id="...").
+· Patch targeting: All patches use target_id (or section_id for sections). No fragile token indexes.
 · Minimum Python: 3.8; some optional features (TOML, auto‑SSL) require 3.9+.
 
 ---
@@ -230,17 +245,25 @@ Flag Effect
   · Clear parser error messages with line numbers
   · ~~--watch flag~~ ✅ done
 · New built‑in widgets
-  · Password field, sliders, date pickers, file upload stubs
-  · ui.markdown(text) for static Markdown blocks
+  · ~~Password field~~ ✅ done
+  · ~~Sliders~~ ✅ done
+  · ~~Date pickers~~ ✅ done
+  · ~~Markdown blocks~~ ✅ done
+  · ~~Toggle switches~~ ✅ done
+  · ~~Progress bars~~ ✅ done
+  · ~~Generic HTML5 inputs~~ ✅ done
+  · File upload stubs
   · Dark/light theme toggle
 · Layout & navigation
   · ~~Tabs and multi‑page layouts~~ ✅ done
+  · ~~Hideable sections with state preservation~~ ✅ done
 · Security hardening
-  · Configurable command allow‑list (already available via pybro.toml)
+  · ~~Command allow‑list (pybro.toml)~~ ✅ done
+  · ~~OS command sandboxing (shlex.split, shell=False)~~ ✅ done
   · Full sandboxing options for Mode 2 clients
 · Advanced scripting
   · Optional persistent state (--state-file)
-  · Custom CSS/JS injection with security gates
+  · Custom JS injection with security gates
 
 ---
 
@@ -263,7 +286,12 @@ pybro_ui/
 └── src/
     └── pybro/
         ├── __init__.py      ← the `ui` stub
-        ├── server.py        ← runtime engine
+        ├── state.py         ← shared globals & locks
+        ├── tree.py          ← tree model & operations
+        ├── parser.py        ← AST parser
+        ├── handler.py       ← HTTP & SSE handler
+        ├── watcher.py       ← file watcher thread
+        ├── server.py        ← entry point & CLI
         ├── index.html       ← front‑end shell
         └── static/          ← modular front‑end JS
 ```
