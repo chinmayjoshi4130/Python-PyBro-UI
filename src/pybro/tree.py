@@ -4,6 +4,7 @@ import json
 import hashlib
 import hmac
 from . import state
+from .state import logger  # use the centralized logger
 
 class UINode:
     __slots__ = ('type', 'attrs', 'children')
@@ -16,6 +17,7 @@ class UINode:
         d = {'type': self.type}
         d.update(self.attrs)
         return d
+
 
 def flatten_tree(node):
     tokens = []
@@ -37,7 +39,9 @@ def flatten_tree(node):
         if n.type in end_map:
             tokens.append({'type': end_map[n.type]})
     walk(node)
+    logger.debug(f"Flattened tree to {len(tokens)} tokens")
     return tokens
+
 
 def find_node_by_id(root, target_id):
     stack = [root]
@@ -46,7 +50,9 @@ def find_node_by_id(root, target_id):
         if node.attrs.get('id') == target_id:
             return node
         stack.extend(node.children)
+    logger.debug(f"Node with id='{target_id}' not found in tree")
     return None
+
 
 def build_tree_from_flat(tokens):
     root = UINode('ROOT')
@@ -69,10 +75,14 @@ def build_tree_from_flat(tokens):
             expected_type = end_map[ttype]
             if stack[-1].type == expected_type:
                 stack.pop()
+            else:
+                logger.warn(f"Mismatched end token: expected {expected_type}, got {stack[-1].type}")
         else:
             node = UINode(ttype, **attrs)
             stack[-1].children.append(node)
+    logger.debug(f"Built tree from {len(tokens)} flat tokens")
     return root
+
 
 def link_tree(node, module):
     if node.type == 'ROOT':
@@ -84,10 +94,16 @@ def link_tree(node, module):
         rows_ref = node.attrs.pop('rows_ref', None)
         if headers_ref and module and hasattr(module, headers_ref):
             node.attrs['headers'] = getattr(module, headers_ref)
+        elif headers_ref:
+            logger.warn(f"Could not resolve table headers reference '{headers_ref}'")
         if rows_ref and module and hasattr(module, rows_ref):
             node.attrs['rows'] = getattr(module, rows_ref)
+        elif rows_ref:
+            logger.warn(f"Could not resolve table rows reference '{rows_ref}'")
     for child in node.children:
         link_tree(child, module)
+    logger.debug(f"Linking complete for node type={node.type}")
+
 
 def get_bundle_info():
     try:
@@ -105,10 +121,13 @@ def get_bundle_info():
                     full = os.path.join(root, fname)
                     rel = os.path.relpath(full, project_dir)
                     files.append(rel)
+        logger.debug(f"Collected {len(files)} .py files from project directory")
         return files
 
     if not state.PROJECT_DIR:
+        logger.info("No project directory set; bundle info empty")
         return {'files': [], 'requires': []}
+
     requires = []
     include = None
     manifest_path = os.path.join(state.PROJECT_DIR, 'pybro.toml')
@@ -119,8 +138,9 @@ def get_bundle_info():
             distribute = config.get('distribute', {})
             include = distribute.get('include')
             requires = distribute.get('requires', [])
-        except Exception:
-            pass
+            logger.debug(f"Read pybro.toml: include={include}, requires={requires}")
+        except Exception as e:
+            logger.warn(f"Could not parse pybro.toml: {e}")
 
     if include:
         files = []
@@ -134,21 +154,35 @@ def get_bundle_info():
                         if fn.endswith('.py'):
                             rel = os.path.relpath(os.path.join(root, fn), state.PROJECT_DIR)
                             files.append(rel)
+            else:
+                logger.warn(f"Include pattern '{pattern}' not found, skipping")
+        logger.info(f"Bundle includes {len(files)} specified files")
         return {'files': files, 'requires': requires}
-    return {'files': collect_project_files(state.PROJECT_DIR), 'requires': requires}
+
+    collected = collect_project_files(state.PROJECT_DIR)
+    logger.info(f"Auto-collected {len(collected)} files for bundle")
+    return {'files': collected, 'requires': requires}
+
 
 def build_token_tree():
     if not state.PROJECT_DIR or not state.SESSION_KEY:
         state.PROJECT_TOKEN_TREE = None
+        logger.debug("Skipping token tree build: missing project dir or session key")
         return
+
     bundle_info = get_bundle_info()
     files_dict = {}
     for rel_path in bundle_info['files']:
         full_path = os.path.join(state.PROJECT_DIR, rel_path)
-        with open(full_path, 'r', encoding='utf-8') as f:
-            files_dict[rel_path] = f.read()
+        try:
+            with open(full_path, 'r', encoding='utf-8') as f:
+                files_dict[rel_path] = f.read()
+        except Exception as e:
+            logger.warn(f"Could not read file {rel_path}: {e}")
+
     with state.tree_lock:
         tokens_flat = flatten_tree(state.UI_ROOT)
+
     payload = {
         "ui_tokens": tokens_flat,
         "files": files_dict,
@@ -158,3 +192,4 @@ def build_token_tree():
     sig = hmac.new(state.SESSION_KEY.encode('utf-8'), payload_json, hashlib.sha256).hexdigest()
     payload['signature'] = sig
     state.PROJECT_TOKEN_TREE = payload
+    logger.info(f"Token tree built: {len(tokens_flat)} tokens, {len(files_dict)} files, signature valid")

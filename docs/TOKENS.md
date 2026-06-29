@@ -41,7 +41,7 @@ You can override them globally with `ui.root_css({…})` at the top of your scri
 ui.title("text", css={...}, class_="...")
 ```
 
-DOM:
+### DOM:
 <h1>text</h1>
 
 · css and class_ are applied directly to the <h1>.
@@ -49,7 +49,7 @@ DOM:
 
 ---
 
-UI_INPUT
+### UI_INPUT
 
 ```python
 ui.input_text("id", "label", css={...}, class_="...")

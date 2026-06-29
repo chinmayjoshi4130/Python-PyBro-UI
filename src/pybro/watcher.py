@@ -10,6 +10,8 @@ from . import state
 from .parser import PybroUIParser
 from .tree import link_tree, flatten_tree, build_token_tree
 
+logger = state.logger  # direct reference for readability
+
 def watch_script(script_path, connectable=False):
     last_mtime = os.path.getmtime(script_path)
     while True:
@@ -17,7 +19,7 @@ def watch_script(script_path, connectable=False):
         try:
             current_mtime = os.path.getmtime(script_path)
             if current_mtime != last_mtime:
-                print("[*] Script change detected. Re‑compiling...")
+                logger.info("Script change detected. Re‑compiling...")
                 with open(script_path, "r") as f:
                     ast_tree = ast.parse(f.read())
                 parser_obj = PybroUIParser()
@@ -29,7 +31,8 @@ def watch_script(script_path, connectable=False):
                 try:
                     spec.loader.exec_module(new_module)
                 except Exception as e:
-                    print(f"[!] Warning: could not reload module: {e}")
+                    logger.warn(f"Could not reload module: {e}")
+                    logger.debug(traceback.format_exc())
                 link_tree(new_root, new_module)
                 with state.tree_lock:
                     state.UI_ROOT = new_root
@@ -38,11 +41,11 @@ def watch_script(script_path, connectable=False):
                 if state.PROJECT_DIR and state.SESSION_KEY and connectable:
                     build_token_tree()
                 state.broadcast_event("tokens_updated", json.dumps(flat))
-                print("[+] Re‑compile successful. UI refreshed.")
+                logger.info("Re‑compile successful. UI refreshed.")
                 last_mtime = current_mtime
         except FileNotFoundError:
-            print("[!] Watched script disappeared.")
+            logger.warn("Watched script disappeared.")
             break
         except Exception as e:
-            print(f"[!] Error during re‑compile: {e}")
-            traceback.print_exc()
+            logger.error(f"Error during re‑compile: {e}")
+            logger.debug(traceback.format_exc())
