@@ -165,38 +165,40 @@ ui.root_css({"--bg": "#0a0e17", "--accent": "#f97316", ...})
 
 ### Structural tokens
 
-Call Description
-ui.page_start("Name") Start a named page
-ui.page_end() End the current page
-ui.tab_group_start() Open a tab container
-ui.tab_start("Name") Start a named tab
-ui.tab_end() End the current tab
-ui.tab_group_end() Close the tab group
-ui.row_start() Begin a horizontal flex row
-ui.row_end() End the current row
-ui.section_start("id", visible=True) Start a hideable section
-ui.section_end() End the section
+| Call | Description |
+| :--- | :--- |
+| `ui.page_start("Name")` | Start a named page |
+| `ui.page_end()` | End the current page |
+| `ui.tab_group_start()` | Open a tab container |
+| `ui.tab_start("Name")` | Start a named tab |
+| `ui.tab_end()` | End the current tab |
+| `ui.tab_group_end()` | Close the tab group |
+| `ui.row_start()` | Begin a horizontal flex row |
+| `ui.row_end()` | End the current row |
+| `ui.section_start("id", visible=True)` | Start a hideable section |
+| `ui.section_end()` | End the section |
 
 ### Visual tokens
 
-Call Type Example
-ui.title(text) Heading ui.title("Dashboard")
-ui.input_text(id, label) Text input ui.input_text("host", "Target")
-ui.checkbox(id, label) Checkbox ui.checkbox("verbose", "Verbose")
-ui.dropdown(id, label, options) Drop‑down ui.dropdown("mode", "Mode", ["A","B"])
-ui.text_area(id, label) Read‑only output ui.text_area("log", "Log")
-ui.math_compute(target_id, formula) Client‑side formula ui.math_compute("sum", "{a}+{b}")
-ui.button_callback(text, func, target_id?) Python callback button ui.button_callback("Run", "my_func", "out")
-ui.os_command(cmd, desc, target_id) OS command (with confirmation) ui.os_command("ping -c1 1.1.1.1", "Ping", "out")
-ui.table(headers, rows) Static table ui.table(["Name","Age"], [["A",30]])
-ui.root_css(vars_dict) Global theme ui.root_css({"--accent":"red"})
-ui.markdown(text) Rendered Markdown block ui.markdown("## Welcome\n\nHello world")
-ui.slider(id, label, min, max, step=1) Range slider ui.slider("vol", "Volume", 0, 100, 5)
-ui.password(id, label) Password field ui.password("secret", "API Key")
-ui.toggle(id, label, checked=False) Toggle switch ui.toggle("dark", "Dark Mode", True)
-ui.progress(id, label, value=0, max=100) Progress bar ui.progress("scan", "Scan Progress", 0, 100)
-ui.date(id, label) Date picker ui.date("start", "Start Date")
-ui.input(id, label, type="text") Generic HTML5 input ui.input("email", "Email", "email")
+| Call | Type | Example |
+| :--- | :--- | :--- |
+| `ui.title(text)` | Heading | `ui.title("Dashboard")` |
+| `ui.input_text(id, label)` | Text input | `ui.input_text("host", "Target")` |
+| `ui.checkbox(id, label)` | Checkbox | `ui.checkbox("verbose", "Verbose")` |
+| `ui.dropdown(id, label, options)` | Drop‑down | `ui.dropdown("mode", "Mode", ["A","B"])` |
+| `ui.text_area(id, label)` | Read‑only output | `ui.text_area("log", "Log")` |
+| `ui.math_compute(target_id, formula)` | Client‑side formula | `ui.math_compute("sum", "{a}+{b}")` |
+| `ui.button_callback(text, func, target_id?)` | Python callback button | `ui.button_callback("Run", "my_func", "out")` |
+| `ui.os_command(cmd, desc, target_id)` | OS command (with confirmation) | `ui.os_command("ping -c1 1.1.1.1", "Ping", "out")` |
+| `ui.table(headers, rows)` | Static table | `ui.table(["Name","Age"], [["A",30]])` |
+| `ui.root_css(vars_dict)` | Global theme | `ui.root_css({"--accent":"red"})` |
+| `ui.markdown(text)` | Rendered Markdown block | `ui.markdown("## Welcome\n\nHello world")` |
+| `ui.slider(id, label, min, max, step=1)` | Range slider | `ui.slider("vol", "Volume", 0, 100, 5)` |
+| `ui.password(id, label)` | Password field | `ui.password("secret", "API Key")` |
+| `ui.toggle(id, label, checked=False)` | Toggle switch | `ui.toggle("dark", "Dark Mode", True)` |
+| `ui.progress(id, label, value=0, max=100)` | Progress bar | `ui.progress("scan", "Scan Progress", 0, 100)` |
+| `ui.date(id, label)` | Date picker | `ui.date("start", "Start Date")` |
+| `ui.input(id, label, type="text")` | Generic HTML5 input | `ui.input("email", "Email", "email")` |
 
 Callbacks receive a dict of all current input values, keyed by id. Checkboxes are bool, others are str. Slider, password, date, and generic inputs behave identically to input_text from the callback’s perspective.
 
@@ -211,59 +213,60 @@ See TOKENS.md and CSS_CUSTOM.md for full details.
 
 ## 🧪 Advanced options
 
-Flag Effect
---port 9090 Change the listening port (default 8080)
---verbose Print Apache‑style HTTP request logs
---key <secret> Set the security key explicitly
---keep-script Mode 2: retain the downloaded project after exit
---ssl Serve over HTTPS
---cert-file <path> TLS certificate (PEM)
---key-file <path> TLS private key (PEM)
---allow-deps Mode 2: install dependencies from pybro.toml
---entrypoint <file> Mode 2: specify main script filename
---os-timeout <int> Timeout for OS commands (seconds, default 5)
---watch Watch script for changes and auto‑reload
+| Flag | Effect |
+| :--- | :--- |
+| `--port 9090` | Change the listening port (default 8080) |
+| `--verbose` | Print Apache‑style HTTP request logs |
+| `--key <secret>` | Set the security key explicitly |
+| `--keep-script` | Mode 2: retain the downloaded project after exit |
+| `--ssl` | Serve over HTTPS |
+| `--cert-file <path>` | TLS certificate (PEM) |
+| `--key-file <path>` | TLS private key (PEM) |
+| `--allow-deps` | Mode 2: install dependencies from `pybro.toml` |
+| `--entrypoint <file>` | Mode 2: specify main script filename |
+| `--os-timeout <int>` | Timeout for OS commands (seconds, default 5) |
+| `--watch` | Watch script for changes and auto‑reload |
 
 ---
 
 ## 🔧 Technical notes
 
-· Variable resolution: Simple top‑level lists/dicts are resolved at parse time. Complex expressions and function calls are not yet supported.
-· OS commands: Must match the exact string defined in the script. They run with a configurable timeout and capture output. Only trusted scripts should define them; an optional allow‑list is available in pybro.toml. Execution uses shlex.split() and shell=False to prevent injection.
-· Real‑time updates: Server‑Sent Events (SSE) push token and form‑state changes to all connected browsers.
-· Signed token tree: In shared/connectable mode, the master signs the project with HMAC‑SHA256; the client verifies before executing.
-· Multi‑file projects: The script’s directory is added to sys.path, so relative imports work.
-· button_callback target_id: Can be a positional argument (third) or keyword (target_id="...").
-· Patch targeting: All patches use target_id (or section_id for sections). No fragile token indexes.
-· Minimum Python: 3.8; some optional features (TOML, auto‑SSL) require 3.9+.
+- Variable resolution: Simple top‑level lists/dicts are resolved at parse time. Complex expressions and function calls are not yet supported.
+- OS commands: Must match the exact string defined in the script. They run with a configurable timeout and capture output. Only trusted scripts should define them; an optional allow‑list is available in pybro.toml. Execution uses shlex.split() and shell=False to prevent injection.
+- Real‑time updates: Server‑Sent Events (SSE) push token and form‑state changes to all connected browsers.
+- Signed token tree: In shared/connectable mode, the master signs the project with HMAC‑SHA256; the client verifies before executing.
+- Multi‑file projects: The script’s directory is added to sys.path, so relative imports work.
+- button_callback target_id: Can be a positional argument (third) or keyword (target_id="...").
+- Patch targeting: All patches use target_id (or section_id for sections). No fragile token indexes.
+- Minimum Python: 3.8; some optional features (TOML, auto‑SSL) require 3.9+.
 
 ---
 
 ## 🗺️ Roadmap
 
-· Developer experience
-  · Clear parser error messages with line numbers
-  · ~~--watch flag~~ ✅ done
-· New built‑in widgets
-  · ~~Password field~~ ✅ done
-  · ~~Sliders~~ ✅ done
-  · ~~Date pickers~~ ✅ done
-  · ~~Markdown blocks~~ ✅ done
-  · ~~Toggle switches~~ ✅ done
-  · ~~Progress bars~~ ✅ done
-  · ~~Generic HTML5 inputs~~ ✅ done
-  · File upload stubs
-  · Dark/light theme toggle
-· Layout & navigation
-  · ~~Tabs and multi‑page layouts~~ ✅ done
-  · ~~Hideable sections with state preservation~~ ✅ done
-· Security hardening
-  · ~~Command allow‑list (pybro.toml)~~ ✅ done
-  · ~~OS command sandboxing (shlex.split, shell=False)~~ ✅ done
-  · Full sandboxing options for Mode 2 clients
-· Advanced scripting
-  · Optional persistent state (--state-file)
-  · Custom JS injection with security gates
+- Developer experience
+  - Clear parser error messages with line numbers
+  - ~~--watch flag~~ ✅ done
+- New built‑in widgets
+  - ~~Password field~~ ✅ done
+  - ~~Sliders~~ ✅ done
+  - ~~Date pickers~~ ✅ done
+  - ~~Markdown blocks~~ ✅ done
+  - ~~Toggle switches~~ ✅ done
+  - ~~Progress bars~~ ✅ done
+  - ~~Generic HTML5 inputs~~ ✅ done
+  - File upload stubs
+  - Dark/light theme toggle
+- Layout & navigation
+  - ~~Tabs and multi‑page layouts~~ ✅ done
+  - ~~Hideable sections with state preservation~~ ✅ done
+- Security hardening
+  - ~~Command allow‑list (pybro.toml)~~ ✅ done
+  - ~~OS command sandboxing (shlex.split, shell=False)~~ ✅ done
+  - Full sandboxing options for Mode 2 clients
+- Advanced scripting
+  - Optional persistent state (--state-file)
+  - Custom JS injection with security gates
 
 ---
 
